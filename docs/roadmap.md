@@ -9,12 +9,31 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
+- **The camera is set up without editing code**: on first boot it serves a setup
+  page over its own access point, where the network and an admin password are
+  chosen once and stored on the device. Why now: credentials currently live in a
+  compiled-in header, so the camera cannot move to another network, or be handed
+  to anyone, without a toolchain and a cable. Everything after this inherits that
+  limitation until it is fixed. Domains: config, network, web. Appetite: large.
+
+- **The web interface requires a login**: the stream, stills, and settings sit
+  behind the admin password rather than being open to the network. Why now:
+  recording is the next item, and an open interface holding stored footage is a
+  materially worse exposure than one showing only a live view. Domains: web.
+  Appetite: small.
+
+- **Firmware updates happen from a browser**: a signed-in user uploads a build
+  from a page, with no toolchain involved. Why now: the current path needs
+  PlatformIO, a pinned host port, and a hand-written firewall rule, which is not
+  something that can be handed to anyone else. Domains: web, network.
+  Appetite: small.
+
+## Next
+
 - **Footage survives on the SD card and can be played back**: stated goal, and the
   half of "security camera" that outlives a power cut. Why now: motion detection is
   worth nothing until there is somewhere for a trigger to write to, so storage
   precedes it in dependency order. Domains: storage, camera. Appetite: large.
-
-## Next
 
 - **Recording starts without a human asking**: a camera that records on command is
   not a security camera. Covers the trigger source as an open question: frame
@@ -31,10 +50,11 @@ Domain tags are provisional: no spec directory exists yet.
   decide the retention rule early and awkward to bolt on later. Domains: storage.
   Appetite: small.
 
-- **Tuning happens without a reflash**: changing motion sensitivity or frame size
-  by editing a header and rebuilding makes each experiment a minutes-long round
-  trip, which is how tuning gets abandoned half done. Why now: it pays back across
-  the motion work above. Domains: config, web. Appetite: small.
+- **Camera settings are tunable from the settings page**: motion sensitivity,
+  frame size and exposure are the values worth changing often, and each one
+  currently costs a rebuild. Why now: the setup page in Now establishes where
+  stored settings live, so this becomes additive rather than structural.
+  Domains: config, web. Appetite: small.
 
 - **Someone finds out an event happened without opening the web page**: an
   unwatched camera that only stores footage is a recorder, not an alarm. Delivery
@@ -63,10 +83,6 @@ Domain tags are provisional: no spec directory exists yet.
   need for it. This board is GPIO-constrained and the SD card already competes for
   pins, so it is expensive here specifically. Domains: peripherals, storage.
   Appetite: large.
-
-- **The web interface is not open to anyone on the network**: What would promote
-  it: exposing the camera beyond a trusted LAN, or putting it on a network with
-  guests. Domains: web, network. Appetite: small.
 
 - **Recordings are usable in high contrast**: both test frames so far were badly
   exposed, one blown out by a window and one crushed to near-black by a ceiling

@@ -8,6 +8,7 @@
 #include "camera.h"
 #include "config.h"
 #include "portal.h"
+#include "statusled.h"
 #include "secrets.h"
 #include "web.h"
 
@@ -38,6 +39,20 @@ static bool portalMode = false;
 static bool cameraReady = false;
 static TrialState trial;
 static bool onTrial = false;
+
+// ArduinoOTA has no way out of its wait-for-auth state: it answers an invitation
+// with a challenge and then sits there until another packet arrives. Any stray
+// probe on the network can therefore disable the update path until someone
+// reboots, and the update path is exactly what is needed when something is
+// wrong. Restarting the service on a timer bounds how long that can last.
+//
+// Thirty seconds is affordable because we take mDNS out of ArduinoOTA's hands
+// below, which reduces a restart to rebinding one UDP socket. Left to itself,
+// end() tears down the entire mDNS responder including our own service record,
+// and begin() does not put it back.
+static constexpr uint32_t OTA_REFRESH_MS = 30UL * 1000UL;
+static uint32_t otaRefreshedAt = 0;
+static bool otaInProgress = false;
 
 static constexpr unsigned long RETRY_MIN_MS = 5000;
 static constexpr unsigned long RETRY_MAX_MS = 60000;
@@ -117,6 +132,11 @@ static bool resolveSsid() {
 static void startOta() {
   ArduinoOTA.setHostname(cfg.cameraName.c_str());
 
+  // We register mDNS ourselves in ensureWifi(), including the http service that
+  // ArduinoOTA's own begin() would not restore. Leaving it enabled here makes
+  // every service restart drop the camera's advertisement.
+  ArduinoOTA.setMdnsEnabled(false);
+
   // Prefer the admin password so there is only one to remember. Configs written
   // before this existed fall back to the generated one rather than silently
   // leaving OTA open.
@@ -131,6 +151,7 @@ static void startOta() {
   }
 
   ArduinoOTA.onStart([]() {
+    otaInProgress = true;
     Serial.println("\nOTA starting, shutting down camera and servers");
     stopWebServers();
     serversStarted = false;
@@ -144,12 +165,17 @@ static void startOta() {
       lastPct = pct;
     }
   });
-  ArduinoOTA.onEnd([]() { Serial.println("OTA done, rebooting into the new slot"); });
+  ArduinoOTA.onEnd([]() {
+    otaInProgress = false;
+    Serial.println("OTA done, rebooting into the new slot");
+  });
   ArduinoOTA.onError([](ota_error_t err) {
+    otaInProgress = false;
     Serial.printf("OTA failed (%u). The running firmware is untouched, reboot to recover\n", err);
   });
 
   ArduinoOTA.begin();
+  otaRefreshedAt = millis();
   Serial.printf("OTA ready on %s.local\n", cfg.cameraName.c_str());
 }
 
@@ -162,7 +188,10 @@ static void ensureWifi() {
       everConnected = true;
       Serial.printf("wifi up, %s, RSSI %d dBm\n",
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
-      if (MDNS.begin(cfg.cameraName.c_str())) MDNS.addService("http", "tcp", 80);
+      if (MDNS.begin(cfg.cameraName.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.enableArduino(3232, true);  // ArduinoOTA no longer does this itself
+      }
     } else if (offlineSince != 0) {
       // The first connect is not a reconnect. Counting it would put a permanent
       // off-by-one into the only number that says whether the link is healthy.
@@ -173,7 +202,10 @@ static void ensureWifi() {
                     WiFi.localIP().toString().c_str(), reconnectCount);
       // mDNS loses its registration across a link drop and has to be restarted.
       MDNS.end();
-      if (MDNS.begin(cfg.cameraName.c_str())) MDNS.addService("http", "tcp", 80);
+      if (MDNS.begin(cfg.cameraName.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.enableArduino(3232, true);
+      }
     }
     offlineSince = 0;
     retryDelay = RETRY_MIN_MS;
@@ -186,6 +218,11 @@ static void ensureWifi() {
 
     if (!serversStarted && startWebServers(cameraReady)) {
       serversStarted = true;
+
+      // Opened only once the servers exist, so anyone joining it has something
+      // to reach. Skipped entirely when the setting is off.
+      if (cfg.apWindow) startApWindow();
+      statusLedSet(cameraReady ? Status::Online : Status::CameraFault);
       if (onTrial) {
         // Reaching the network with the servers answering is the only property
         // that decides whether a bad update needs a ladder. Nothing weaker
@@ -201,7 +238,10 @@ static void ensureWifi() {
     return;
   }
 
-  if (offlineSince == 0) offlineSince = millis();
+  if (offlineSince == 0) {
+    offlineSince = millis();
+    statusLedSet(Status::Searching);
+  }
 
   // A radio that has been unreachable this long is usually in a state a fresh
   // boot clears and a reconnect does not. Cheaper than staying dark until
@@ -266,6 +306,8 @@ void setup() {
   // Reset accounting runs first. None of it needs the serial port, and sitting
   // behind a two second delay meant a press only registered 2.4s after the
   // button, leaving barely half the window usable and no way to tell.
+  statusLedInit();
+
   const esp_reset_reason_t why = esp_reset_reason();
   int presses = 0;
   if (why == ESP_RST_POWERON || why == ESP_RST_EXT) {
@@ -321,6 +363,7 @@ void setup() {
   // uninitialised: setup needs the radio and the memory, not frames.
   if (!cfg.configured) {
     portalMode = true;
+    statusLedSet(Status::Searching);
     if (!startSetupPortal()) {
       Serial.println("could not start setup portal, restarting");
       delay(2000);
@@ -343,6 +386,7 @@ void setup() {
   }
 
   startWifi();
+  statusLedSet(Status::Searching);
   Serial.println("send 'p' for a frame, 'd' to force a wifi drop");
 }
 
@@ -356,9 +400,14 @@ void loop() {
 
   if (portalMode) {
     portalLoop();
+    statusLedTick();
     delay(5);
     return;
   }
+
+  // Drives the DNS responder and closes the window when its time is up.
+  portalLoop();
+  statusLedTick();
 
   // Serial capture is kept as a fallback for when the network is the thing that
   // is broken, which is exactly when the browser view is no help.
@@ -383,6 +432,14 @@ void loop() {
 
   ensureWifi();
   ArduinoOTA.handle();
+
+  // Cheap, and only ever runs when no transfer is underway, so a legitimate
+  // update is never interrupted by it.
+  if (!otaInProgress && millis() - otaRefreshedAt > OTA_REFRESH_MS) {
+    otaRefreshedAt = millis();
+    ArduinoOTA.end();
+    ArduinoOTA.begin();
+  }
 
   static unsigned long lastReport = 0;
   if (millis() - lastReport > 15000) {

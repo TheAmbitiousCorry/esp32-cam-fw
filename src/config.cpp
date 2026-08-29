@@ -81,6 +81,7 @@ bool configLoad(Config &out) {
   out.adminHash = prefs.getString("hash", "");
   out.otaPassword = prefs.getString("otapw", "");
   out.otaMd5 = prefs.getString("otamd5", "");
+  out.apWindow = prefs.getBool("apwin", true);
   out.configured = prefs.getBool("done", false);
   prefs.end();
 
@@ -103,6 +104,7 @@ bool configSave(const Config &cfg) {
   prefs.putString("hash", cfg.adminHash);
   prefs.putString("otapw", cfg.otaPassword);
   prefs.putString("otamd5", cfg.otaMd5);
+  prefs.putBool("apwin", cfg.apWindow);
   prefs.putBool("done", true);
   prefs.end();
   return true;

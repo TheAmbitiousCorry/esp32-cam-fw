@@ -11,6 +11,7 @@
 #include "auth.h"
 #include "camera.h"
 #include "config.h"
+#include "portal.h"
 #include "httputil.h"
 #include "web.h"
 
@@ -295,12 +296,18 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   };
   row("Camera sensor", cameraAvailable ? "detected" : "NOT DETECTED");
   row("Uptime", humanUptime());
-  row("Address", WiFi.localIP().toString());
-  row("Signal", String(WiFi.RSSI()) + " dBm");
+  const bool online = WiFi.status() == WL_CONNECTED;
+  row("Network", online ? WiFi.SSID() : String("disconnected"));
+  row("Address", online ? WiFi.localIP().toString() : String("none"));
+  row("Signal", online ? String(WiFi.RSSI()) + " dBm" : String("n/a"));
   row("Reconnects", String(reconnectTally));
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
   row("Running slot", running ? running->label : "unknown");
+  row("Setup access point", apWindowOpen()
+                                ? "open, " + String(apWindowSecondsLeft() / 60) +
+                                      " min left"
+                                : "closed");
   row("Reset presses", String(bootPress) + " of " + String(bootPressNeeded) + " at last boot");
   row("Firmware", String(FIRMWARE_VERSION));
   row("Built", String(__DATE__) + " " + __TIME__);
@@ -321,7 +328,8 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   if (configLoad(stored)) {
     row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
   }
-  body += "</table>";
+  body += "</table><div class=actions>"
+          "<a class=btn href=\"/restart\">Restart camera</a></div>";
   return sendShell(req, "/status", body);
 }
 
@@ -334,15 +342,99 @@ static esp_err_t sendSettings(httpd_req_t *req, const String &notice) {
   body += "<label>Camera name</label><input name=camname value=\"" +
           htmlEscape(stored.cameraName) + "\" required>";
   body += "<small class=sub>Changing this changes the address you visit.</small>";
+  // Scanning blocks and hops channels, which would drop both the station and
+  // anyone on the maintenance access point mid-request. Kick it off
+  // asynchronously and let the page collect the result when it is ready.
+  if (WiFi.scanComplete() == WIFI_SCAN_FAILED) WiFi.scanNetworks(true, true);
+
+  body += "<label>Wi-Fi network</label>"
+          "<select id=scanlist style=\"margin-bottom:6px\">"
+          "<option value=\"\">Scanning...</option></select>"
+          "<input name=ssid id=ssid value=\"" + htmlEscape(stored.wifiSsid) +
+          "\" required>";
+  body += "<small class=sub>Pick one from the list, or type it if the network is "
+          "hidden. The box below is what gets saved.</small>";
+  body += "<label>Wi-Fi password</label><input type=password name=wifipass "
+          "placeholder=\"leave blank to keep the current one\">";
+  body += "<small class=sub>Getting this wrong takes the camera off the network. "
+          "It keeps retrying, and offers a recovery access point if it cannot get "
+          "back on.</small>";
   body += "<label>Firmware update password</label><input name=otapw value=\"" +
           htmlEscape(stored.otaPassword) + "\" required>";
+  body += String("<label><input type=checkbox name=apwin value=1 style=\"width:auto\"") +
+          (stored.apWindow ? " checked" : "") +
+          "> Open a setup access point for 15 minutes after each restart</label>";
+  body += "<small class=sub>How you get back in if this camera's network stops "
+          "working. It closes on its own, and still requires your sign-in "
+          "password.</small>";
   body += "<small class=sub>Used by command line tools. Separate from your sign-in "
           "password on purpose: the update protocol stores it weakly, and your "
           "login should not inherit that.</small>";
   if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
   body += "<div class=actions><button type=submit class=primary>Save and restart"
           "</button></div></form>";
+  body += R"HTML(<script>
+const list = document.getElementById('scanlist');
+const box = document.getElementById('ssid');
+// Selecting from the list fills the text box rather than replacing it, so a
+// hidden network typed by hand is never clobbered by a scan finishing late.
+list.onchange = () => { if (list.value) box.value = list.value; };
+(async function poll(tries) {
+  const nets = await (await fetch('/networks')).json();
+  if (nets.length === 0 && tries > 0) return setTimeout(() => poll(tries - 1), 1200);
+  list.innerHTML = '<option value="">' +
+    (nets.length ? 'Choose a network...' : 'No networks found') + '</option>';
+  for (const n of nets) {
+    const o = document.createElement('option');
+    o.value = n.s;
+    o.textContent = n.s + '  (' + n.r + ' dBm)';
+    list.appendChild(o);
+  }
+})(8);
+</script>)HTML";
   return sendShell(req, "/settings", body);
+}
+
+// Returns whatever the asynchronous scan has produced, or an empty list while it
+// is still running, so the page can poll without ever blocking the device.
+// A way back from a wedged service without pulling the power. Costs one handler
+// and removes the only remaining reason to reach for the plug.
+static esp_err_t restartHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+  const esp_err_t res = sendShell(req, "/status",
+                                  "<h1>Restarting</h1><p class=sub>Back in about "
+                                  "fifteen seconds. You will need to sign in "
+                                  "again.</p>");
+  Serial.println("restart requested from the web interface");
+  delay(1200);
+  ESP.restart();
+  return res;
+}
+
+static esp_err_t networksHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const int found = WiFi.scanComplete();
+  String json = "[";
+  if (found > 0) {
+    for (int i = 0; i < found; i++) {
+      const String ssid = WiFi.SSID(i);
+      if (ssid.isEmpty()) continue;
+      if (json.length() > 1) json += ",";
+      String escaped;
+      for (size_t c = 0; c < ssid.length(); c++) {
+        const char ch = ssid[c];
+        if (ch == '"' || ch == '\\') escaped += '\\';
+        escaped += ch;
+      }
+      json += "{\"s\":\"" + escaped + "\",\"r\":" + String(WiFi.RSSI(i)) + "}";
+    }
+    WiFi.scanDelete();
+  }
+  json += "]";
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, json.c_str(), json.length());
 }
 
 static esp_err_t settingsPageHandler(httpd_req_t *req) {
@@ -361,12 +453,19 @@ static esp_err_t settingsPostHandler(httpd_req_t *req) {
 
   const String camname = formField(body, "camname");
   const String otapw = formField(body, "otapw");
-  if (camname.isEmpty() || otapw.isEmpty()) {
-    return sendSettings(req, "Both fields are required.");
+  const String ssid = formField(body, "ssid");
+  const String wifipass = formField(body, "wifipass");
+  if (camname.isEmpty() || otapw.isEmpty() || ssid.isEmpty()) {
+    return sendSettings(req, "Name, network and update password are all required.");
   }
 
   stored.cameraName = sanitizeHostname(camname);
   stored.otaPassword = otapw;
+  stored.wifiSsid = ssid;
+  stored.apWindow = !formField(body, "apwin").isEmpty();
+  // Blank means unchanged: echoing a stored password back into a form only to
+  // have it submitted again is a good way to lose it to a typo.
+  if (!wifipass.isEmpty()) stored.wifiPass = wifipass;
   if (!configSave(stored)) return sendSettings(req, "Could not write settings.");
 
   // A restart rather than applying in place: mDNS and ArduinoOTA both bind their
@@ -493,6 +592,8 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t flash   = {"/flash",   HTTP_POST, flashHandler,      nullptr};
   httpd_uri_t setpage = {"/settings", HTTP_GET,  settingsPageHandler, nullptr};
   httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
+  httpd_uri_t nets    = {"/networks", HTTP_GET,  networksHandler,     nullptr};
+  httpd_uri_t restart = {"/restart",  HTTP_GET,  restartHandler,      nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
   httpd_uri_t stream  = {"/stream",  HTTP_GET, streamHandler,  nullptr};
 
@@ -521,6 +622,8 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &flash);
   registerUri(pageServer, &setpage);
   registerUri(pageServer, &setpost);
+  registerUri(pageServer, &nets);
+  registerUri(pageServer, &restart);
   registerUri(pageServer, &capture);
 
   // The stream gets its own server because a handler that never returns occupies

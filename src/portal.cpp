@@ -10,6 +10,15 @@
 static DNSServer dnsServer;
 static httpd_handle_t portalServer = nullptr;
 static bool portalRunning = false;
+static bool windowRunning = false;
+static uint32_t windowClosesAt = 0;
+static int windowChannel = 0;
+static bool openAp(int channel);
+static uint32_t windowChannelCheckedAt = 0;
+
+// Long enough to fetch a laptop from another room, short enough that the camera
+// is not broadcasting an access point all day.
+static constexpr uint32_t AP_WINDOW_MS = 15UL * 60UL * 1000UL;
 static String apSsid;
 
 // The ESP32 default is 192.168.4.1, chosen because it avoids the two ranges home
@@ -191,5 +200,86 @@ bool startSetupPortal() {
 }
 
 void portalLoop() {
-  if (portalRunning) dnsServer.processNextRequest();
+  if (portalRunning || windowRunning) dnsServer.processNextRequest();
+  if (!windowRunning) return;
+
+  if (apWindowSecondsLeft() == 0) {
+    stopApWindow();
+    return;
+  }
+
+  // A router that changes channel takes the station with it and leaves the
+  // access point stranded on the old one, still broadcasting but unreachable.
+  // Follow it, so the recovery path stays a recovery path.
+  if (millis() - windowChannelCheckedAt < 3000) return;
+  windowChannelCheckedAt = millis();
+
+  if (WiFi.status() != WL_CONNECTED) return;
+  const int staChannel = WiFi.channel();
+  if (staChannel == windowChannel || staChannel <= 0) return;
+
+  Serial.printf("station moved to ch%d, reopening the access point there\n", staChannel);
+  if (!openAp(staChannel)) {
+    Serial.println("could not follow the channel change, closing the window");
+    stopApWindow();
+  }
+}
+
+static String apName() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  char suffix[5];
+  snprintf(suffix, sizeof(suffix), "%02X%02X",
+           (uint8_t)((chipId >> 32) & 0xFF), (uint8_t)((chipId >> 40) & 0xFF));
+  return String("ESP32CAM-Setup-") + suffix;
+}
+
+// One radio means one channel. Letting softAP pick its own drags the station off
+// the router's channel and drops the connection, which is the opposite of what a
+// recovery feature should do. Always follow the station.
+static bool openAp(int channel) {
+  WiFi.mode(WIFI_AP_STA);
+  if (!WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK)) return false;
+  if (!WiFi.softAP(apSsid.c_str(), nullptr, channel)) return false;
+  windowChannel = channel;
+  return true;
+}
+
+bool startApWindow() {
+  if (windowRunning || portalRunning) return false;
+
+  apSsid = apName();
+  // Only meaningful when associated. Disconnected, the channel reads stale, so
+  // pick a legal default rather than an arbitrary one.
+  const int staChannel = WiFi.status() == WL_CONNECTED ? WiFi.channel() : 1;
+  if (!openAp(staChannel)) {
+    Serial.println("could not open the maintenance window");
+    return false;
+  }
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(53, "*", WiFi.softAPIP());
+
+  windowRunning = true;
+  windowClosesAt = millis() + AP_WINDOW_MS;
+  Serial.printf("maintenance window open for %lu minutes on ch%d: join \"%s\", "
+                "then http://%s and sign in\n",
+                (unsigned long)(AP_WINDOW_MS / 60000), staChannel, apSsid.c_str(),
+                WiFi.softAPIP().toString().c_str());
+  return true;
+}
+
+void stopApWindow() {
+  if (!windowRunning) return;
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  windowRunning = false;
+  Serial.println("maintenance window closed");
+}
+
+bool apWindowOpen() { return windowRunning; }
+
+uint32_t apWindowSecondsLeft() {
+  if (!windowRunning) return 0;
+  const int32_t left = (int32_t)(windowClosesAt - millis());
+  return left > 0 ? (uint32_t)(left / 1000) : 0;
 }

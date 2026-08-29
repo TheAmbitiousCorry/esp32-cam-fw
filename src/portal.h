@@ -4,6 +4,15 @@
 // the network and admin credentials into NVS, then reboots into normal running.
 bool startSetupPortal();
 
+// The post-restart maintenance window. Runs alongside normal operation: the main
+// web server already listens on every interface, so a client on the access point
+// reaches the ordinary interface and signs in as usual. No second form, and no
+// unauthenticated way in.
+bool startApWindow();
+void stopApWindow();
+bool apWindowOpen();
+uint32_t apWindowSecondsLeft();
+
 // Drives the captive-portal DNS responder. Call every loop pass while the portal
 // is up; does nothing otherwise.
 void portalLoop();

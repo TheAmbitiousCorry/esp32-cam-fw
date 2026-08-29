@@ -17,6 +17,11 @@ struct Config {
   // protocol, which is why the browser updater is the preferred path.
   String otaMd5;
   String otaPassword;  // legacy generated password, used when otaMd5 is unset
+  // A maintenance window after every restart, the way a router or a tower does
+  // it: the access point is up for a fixed time and then closes on its own.
+  // Covers a Wi-Fi password that changed, without leaving an AP broadcasting
+  // permanently.
+  bool apWindow = true;
   bool configured = false;
 };
 

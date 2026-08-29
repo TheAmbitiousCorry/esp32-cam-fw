@@ -9,6 +9,19 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
+- **The camera reconnects on its own after the network drops**: the current code
+  gives up permanently after a twenty-second timeout, so a router reboot ends the
+  run until someone power-cycles the board. Why now: it is a known defect rather
+  than a risk, and everything remote depends on the camera still being reachable.
+  Domains: network. Appetite: small.
+
+- **Firmware updates without physical access**: an inserted SD card holds GPIO2
+  high and blocks USB flashing entirely, so every iteration on the recording code
+  costs a card removal and reinsertion. Why now: the storage work below is many
+  cycles of exactly that, and OTA needs a dual-slot partition table, which is free
+  to change now and requires erasing the card's companion device later.
+  Domains: network. Appetite: small.
+
 - **Footage survives on the SD card and can be played back**: stated goal, and the
   half of "security camera" that outlives a power cut. Why now: motion detection is
   worth nothing until there is somewhere for a trigger to write to, so storage
@@ -21,12 +34,6 @@ Domain tags are provisional: no spec directory exists yet.
   differencing, a PIR sensor, or both. Why now: it is the point of the project, and
   everything after it is refinement. Domains: motion, camera, storage. Appetite: large.
 
-- **The camera survives a router reboot and a week unattended**: Wi-Fi drops, task
-  watchdog resets, and heap fragmentation each end the run silently. Why now:
-  unattended operation is the whole premise, and retrofitting reconnect logic into
-  a working single-run firmware is harder than building it in. Domains: network.
-  Appetite: small.
-
 - **Recordings carry a real timestamp**: files named by an uptime counter cannot be
   reviewed after an event. Why now: it changes the file naming and directory
   layout, which is expensive to migrate once there is footage on the card.
@@ -37,10 +44,10 @@ Domain tags are provisional: no spec directory exists yet.
   decide the retention rule early and awkward to bolt on later. Domains: storage.
   Appetite: small.
 
-- **Tuning happens without a reflash**: on this board every reflash means an FTDI
-  adapter, a GPIO0 jumper, and two resets, which makes iterating on motion
-  sensitivity or frame size punishing. Why now: it pays back across the whole
-  motion-tuning item above. Domains: config, web. Appetite: small.
+- **Tuning happens without a reflash**: changing motion sensitivity or frame size
+  by editing a header and rebuilding makes each experiment a minutes-long round
+  trip, which is how tuning gets abandoned half done. Why now: it pays back across
+  the motion work above. Domains: config, web. Appetite: small.
 
 - **Someone finds out an event happened without opening the web page**: an
   unwatched camera that only stores footage is a recorder, not an alarm. Delivery
@@ -65,11 +72,6 @@ Domain tags are provisional: no spec directory exists yet.
   that has no power, and an acceptance that continuous streaming and battery
   operation are mutually exclusive. Domains: power, camera. Appetite: large.
 
-- **Firmware updates without physical access**: the FTDI-and-jumper flashing dance
-  stops being viable the moment the board is mounted somewhere awkward. What would
-  promote it: the camera being installed in its real position. Domains: network.
-  Appetite: small.
-
 - **Recordings capture sound as well as picture**: What would promote it: a stated
   need for it. This board is GPIO-constrained and the SD card already competes for
   pins, so it is expensive here specifically. Domains: peripherals, storage.
@@ -78,3 +80,9 @@ Domain tags are provisional: no spec directory exists yet.
 - **The web interface is not open to anyone on the network**: What would promote
   it: exposing the camera beyond a trusted LAN, or putting it on a network with
   guests. Domains: web, network. Appetite: small.
+
+- **Recordings are usable in high contrast**: both test frames so far were badly
+  exposed, one blown out by a window and one crushed to near-black by a ceiling
+  light. A doorway camera faces exactly that scene every day. What would promote
+  it: footage from the real mounting position turning out unusable at dawn or
+  dusk. Domains: camera. Appetite: small.

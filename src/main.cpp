@@ -7,7 +7,22 @@
 #include "secrets.h"
 #include "web.h"
 
-static constexpr unsigned long WIFI_TIMEOUT_MS = 20000;
+// Retry cadence after a drop. Backing off keeps a long outage from hammering the
+// radio, and the reboot is a last resort for the states a reconnect cannot clear.
+static constexpr unsigned long RETRY_MIN_MS = 5000;
+static constexpr unsigned long RETRY_MAX_MS = 60000;
+static constexpr unsigned long REBOOT_AFTER_OFFLINE_MS = 10UL * 60UL * 1000UL;
+
+// The exact SSID as broadcast, which may carry padding the config file does not.
+// Resolved once by scanning, then reused so reconnects skip the scan.
+static String apSsid;
+
+static bool serversStarted = false;
+static bool everConnected = false;
+static unsigned long offlineSince = 0;
+static unsigned long lastAttempt = 0;
+static unsigned long retryDelay = RETRY_MIN_MS;
+static uint32_t reconnectCount = 0;
 
 // WiFi.status() only ever says "not connected". The disconnect event carries the
 // reason, which is the difference between a wrong password and an AP that was
@@ -24,13 +39,16 @@ static void onWifiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
     case 203: meaning = "assoc failed: AP refused, check MAC filtering"; break;
     case 204: meaning = "handshake timeout"; break;
   }
-  Serial.printf("\nwifi disconnect reason %u: %s\n", reason, meaning);
+  Serial.printf("wifi down, reason %u: %s\n", reason, meaning);
 }
 
 // Routers are allowed to broadcast an SSID with leading or trailing spaces, and
 // nothing in a config file or a scan listing shows them. Match on the trimmed
-// name, then connect with whatever exact string the radio actually reported.
-static int findBestAp(int found) {
+// name, then keep whatever exact string the radio actually reported.
+static bool resolveSsid() {
+  Serial.printf("scanning for [%s]\n", WIFI_SSID);
+  const int found = WiFi.scanNetworks();
+
   String want = WIFI_SSID;
   want.trim();
 
@@ -44,12 +62,88 @@ static int findBestAp(int found) {
       best = i;
     }
   }
-  return best;
+
+  if (best < 0) {
+    Serial.println("  no matching AP. Check WIFI_SSID, and that the network is 2.4GHz");
+    WiFi.scanDelete();
+    return false;
+  }
+
+  apSsid = WiFi.SSID(best);
+  if (apSsid != WIFI_SSID) {
+    Serial.printf("  AP broadcasts [%s], config says [%s]. Using the AP's.\n",
+                  apSsid.c_str(), WIFI_SSID);
+  }
+  Serial.printf("  found on ch%d at %d dBm\n", WiFi.channel(best), bestRssi);
+  WiFi.scanDelete();
+  return true;
 }
 
-static bool connectWifi() {
+// Non-blocking. Called every pass, does nothing while the link is healthy, and
+// drives reconnection when it is not. Nothing here waits, so the camera keeps
+// serving frames to anyone still connected while the radio sorts itself out.
+static void ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!everConnected) {
+      everConnected = true;
+      Serial.printf("wifi up, %s, RSSI %d dBm\n",
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      if (MDNS.begin(MDNS_HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    } else if (offlineSince != 0) {
+      // The first connect is not a reconnect. Counting it would put a permanent
+      // off-by-one into the only number that says whether the link is healthy.
+      reconnectCount++;
+      Serial.printf("wifi back after %lus, %s (reconnect #%u)\n",
+                    (millis() - offlineSince) / 1000,
+                    WiFi.localIP().toString().c_str(), reconnectCount);
+      // mDNS loses its registration across a link drop and has to be restarted.
+      MDNS.end();
+      if (MDNS.begin(MDNS_HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    }
+    offlineSince = 0;
+    retryDelay = RETRY_MIN_MS;
+
+    if (!serversStarted && startWebServers()) {
+      serversStarted = true;
+      Serial.printf("ready. open http://%s or http://%s.local\n",
+                    WiFi.localIP().toString().c_str(), MDNS_HOSTNAME);
+    }
+    return;
+  }
+
+  if (offlineSince == 0) offlineSince = millis();
+
+  // A radio that has been unreachable this long is usually in a state a fresh
+  // boot clears and a reconnect does not. Cheaper than staying dark until
+  // someone notices and pulls the power.
+  if (millis() - offlineSince > REBOOT_AFTER_OFFLINE_MS) {
+    Serial.println("offline too long, restarting");
+    Serial.flush();
+    ESP.restart();
+  }
+
+  if (millis() - lastAttempt < retryDelay) return;
+  lastAttempt = millis();
+
+  if (apSsid.isEmpty() && !resolveSsid()) {
+    retryDelay = min(retryDelay * 2, RETRY_MAX_MS);
+    return;
+  }
+
+  Serial.printf("connecting to [%s]...\n", apSsid.c_str());
+  WiFi.disconnect();
+  WiFi.begin(apSsid.c_str(), WIFI_PASS);
+  retryDelay = min(retryDelay * 2, RETRY_MAX_MS);
+}
+
+static void startWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(onWifiDisconnect, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.setAutoReconnect(true);
+
+  // Credentials live in the firmware, so there is nothing to gain from writing
+  // them to NVS on every boot and flash wear to lose.
+  WiFi.persistent(false);
 
   // This AP advertises WPA and WPA2 together. Recent IDF releases refuse the
   // weaker half by default, so lower the floor rather than fail on a mixed router.
@@ -58,44 +152,6 @@ static bool connectWifi() {
   // Modem sleep saves power but adds hundreds of milliseconds of latency and
   // stalls an MJPEG stream badly. Trade it back for responsiveness.
   WiFi.setSleep(false);
-
-  Serial.printf("looking for [%s]\n", WIFI_SSID);
-  const int found = WiFi.scanNetworks();
-  for (int i = 0; i < found; i++) {
-    Serial.printf("  [%s] ch%-3d %4d dBm\n", WiFi.SSID(i).c_str(),
-                  WiFi.channel(i), WiFi.RSSI(i));
-  }
-
-  const int best = findBestAp(found);
-  if (best < 0) {
-    Serial.println("no AP matched. Check WIFI_SSID, and that the network is 2.4GHz");
-    WiFi.scanDelete();
-    return false;
-  }
-
-  const String exactSsid = WiFi.SSID(best);
-  if (exactSsid != WIFI_SSID) {
-    Serial.printf("note: AP broadcasts [%s], config says [%s]. Using the AP's.\n",
-                  exactSsid.c_str(), WIFI_SSID);
-  }
-  Serial.printf("connecting to [%s] ch%d %d dBm", exactSsid.c_str(),
-                WiFi.channel(best), WiFi.RSSI(best));
-  WiFi.scanDelete();
-
-  WiFi.begin(exactSsid.c_str(), WIFI_PASS);
-  const unsigned long deadline = millis() + WIFI_TIMEOUT_MS;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay(250);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("wifi failed (status %d)\n", WiFi.status());
-    return false;
-  }
-  Serial.printf("wifi up, %s, RSSI %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  return true;
 }
 
 // Chunk size is divisible by 3 so only the final chunk carries base64 padding,
@@ -125,16 +181,12 @@ void setup() {
                 psramFound() ? "found" : "MISSING", ESP.getFreePsram());
 
   if (!cameraInit()) return;
-  if (!connectWifi()) return;
 
-  if (MDNS.begin(MDNS_HOSTNAME)) {
-    MDNS.addService("http", "tcp", 80);
-    Serial.printf("also at http://%s.local\n", MDNS_HOSTNAME);
-  }
-
-  if (!startWebServers()) return;
-  Serial.printf("ready. open http://%s\n", WiFi.localIP().toString().c_str());
-  Serial.println("send 'p' for a base64 frame over serial");
+  // The network is brought up but not waited for. ensureWifi() takes it from
+  // here, so a router that is down at boot delays the camera rather than
+  // ending the run, which is the same path a mid-flight drop takes.
+  startWifi();
+  Serial.println("send 'p' for a frame, 'd' to force a wifi drop");
 }
 
 void loop() {
@@ -142,7 +194,14 @@ void loop() {
   // is broken, which is exactly when the browser view is no help.
   bool wantDump = false;
   while (Serial.available()) {
-    if (Serial.read() == 'p') wantDump = true;
+    const char c = Serial.read();
+    if (c == 'p') wantDump = true;
+    // Reconnect logic that has never been exercised is a guess. This makes the
+    // drop reproducible without power-cycling the router.
+    if (c == 'd') {
+      Serial.println("forcing disconnect");
+      WiFi.disconnect(false, false);
+    }
   }
   if (wantDump) {
     camera_fb_t *fb = esp_camera_fb_get();
@@ -152,11 +211,13 @@ void loop() {
     }
   }
 
+  ensureWifi();
+
   static unsigned long lastReport = 0;
   if (millis() - lastReport > 15000) {
     lastReport = millis();
-    Serial.printf("up %lus  heap %u  psram %u  wifi %s\n", millis() / 1000,
-                  ESP.getFreeHeap(), ESP.getFreePsram(),
+    Serial.printf("up %lus  heap %u  psram %u  reconnects %u  wifi %s\n",
+                  millis() / 1000, ESP.getFreeHeap(), ESP.getFreePsram(), reconnectCount,
                   WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "DOWN");
   }
   delay(50);

@@ -9,12 +9,6 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-- **The camera reconnects on its own after the network drops**: the current code
-  gives up permanently after a twenty-second timeout, so a router reboot ends the
-  run until someone power-cycles the board. Why now: it is a known defect rather
-  than a risk, and everything remote depends on the camera still being reachable.
-  Domains: network. Appetite: small.
-
 - **Firmware updates without physical access**: an inserted SD card holds GPIO2
   high and blocks USB flashing entirely, so every iteration on the recording code
   costs a card removal and reinsertion. Why now: the storage work below is many

@@ -86,6 +86,7 @@ static esp_err_t saveHandler(httpd_req_t *req) {
   const String user = formField(body, "user");
   const String pass = formField(body, "pass");
   const String pass2 = formField(body, "pass2");
+  const String otapw = formField(body, "otapw");
 
   String problem;
   if (camname.isEmpty()) problem = "Give the camera a name.";
@@ -104,8 +105,10 @@ static esp_err_t saveHandler(httpd_req_t *req) {
   cfg.wifiSsid = ssid;
   cfg.wifiPass = wifipass;
   cfg.adminUser = user;
+  cfg.otaPassword = otapw.isEmpty() ? makeSalt().substring(0, 12) : otapw;
   cfg.adminSalt = makeSalt();
   cfg.adminHash = derivePasswordHash(cfg.adminSalt, pass);
+  cfg.otaMd5 = md5Hex(pass);
   cfg.configured = true;
 
   if (cfg.adminHash.isEmpty() || !configSave(cfg)) {

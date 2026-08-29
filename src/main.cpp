@@ -117,15 +117,18 @@ static bool resolveSsid() {
 static void startOta() {
   ArduinoOTA.setHostname(cfg.cameraName.c_str());
 
-  // Generated rather than chosen, because espota needs the plaintext and the
-  // admin password is deliberately only stored as a hash. Readable from the
-  // status page once signed in.
-  if (cfg.otaPassword.isEmpty()) {
-    cfg.otaPassword = makeSalt().substring(0, 12);
-    configSave(cfg);
-    Serial.println("generated an OTA password, see the status page");
+  // Prefer the admin password so there is only one to remember. Configs written
+  // before this existed fall back to the generated one rather than silently
+  // leaving OTA open.
+  if (!cfg.otaMd5.isEmpty()) {
+    ArduinoOTA.setPasswordHash(cfg.otaMd5.c_str());
+    Serial.println("OTA uses the admin password");
+  } else if (!cfg.otaPassword.isEmpty()) {
+    ArduinoOTA.setPassword(cfg.otaPassword.c_str());
+    Serial.println("OTA uses the generated password, see the status page");
+  } else {
+    Serial.println("WARNING: OTA has no password, anyone on this network can reflash");
   }
-  ArduinoOTA.setPassword(cfg.otaPassword.c_str());
 
   ArduinoOTA.onStart([]() {
     Serial.println("\nOTA starting, shutting down camera and servers");

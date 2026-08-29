@@ -27,6 +27,12 @@ static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u
 static String cameraName = "camera";
 static bool cameraAvailable = false;
 static uint32_t reconnectTally = 0;
+
+// Set while firmware is being written. The stream handler polls it and returns,
+// which is the only way out of a handler that otherwise loops until the client
+// disconnects. Calling httpd_stop() on that server instead deadlocks: it waits
+// for the handler, and the handler is waiting for a client that is still there.
+static volatile bool updating = false;
 static int bootPress = 0;
 static int bootPressNeeded = 3;
 
@@ -72,6 +78,14 @@ static const char SHARED_CSS[] =
     "aside a{border-left:0;border-bottom:3px solid transparent;white-space:nowrap}"
     "aside a.on{border-left:0;border-bottom-color:#2a7}}";
 
+// Wraps registration so a full handler table is loud rather than a mystery 404.
+static void registerUri(httpd_handle_t server, const httpd_uri_t *uri) {
+  const esp_err_t err = httpd_register_uri_handler(server, uri);
+  if (err != ESP_OK) {
+    Serial.printf("failed to register %s: %s\n", uri->uri, esp_err_to_name(err));
+  }
+}
+
 static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
   String page = "<!doctype html><meta charset=utf-8>"
                 "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -89,7 +103,8 @@ static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
 static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &main) {
   struct Item { const char *href; const char *label; };
   static const Item items[] = {
-      {"/", "Live view"}, {"/status", "Status"}, {"/update", "Firmware"}};
+      {"/", "Live view"}, {"/status", "Status"}, {"/settings", "Settings"},
+      {"/update", "Firmware"}};
 
   String nav = "<div class=app><aside><div class=brand>" + htmlEscape(cameraName) + "</div>";
   for (const Item &it : items) {
@@ -245,7 +260,8 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     // one and the driver stalls after fb_count frames.
     esp_camera_fb_return(fb);
 
-    if (res != ESP_OK) break;  // client went away, which is the normal exit
+    if (res != ESP_OK) break;   // client went away, which is the normal exit
+    if (updating) break;        // firmware is being written; release the camera
   }
   return res;
 }
@@ -302,11 +318,66 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   }
 
   Config stored;
-  if (configLoad(stored) && !stored.otaPassword.isEmpty()) {
-    row("OTA password", stored.otaPassword);
+  if (configLoad(stored)) {
+    row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
   }
   body += "</table>";
   return sendShell(req, "/status", body);
+}
+
+static esp_err_t sendSettings(httpd_req_t *req, const String &notice) {
+  Config stored;
+  configLoad(stored);
+
+  String body = "<h1>Settings</h1><form method=post action=/settings "
+                "style=\"max-width:340px\">";
+  body += "<label>Camera name</label><input name=camname value=\"" +
+          htmlEscape(stored.cameraName) + "\" required>";
+  body += "<small class=sub>Changing this changes the address you visit.</small>";
+  body += "<label>Firmware update password</label><input name=otapw value=\"" +
+          htmlEscape(stored.otaPassword) + "\" required>";
+  body += "<small class=sub>Used by command line tools. Separate from your sign-in "
+          "password on purpose: the update protocol stores it weakly, and your "
+          "login should not inherit that.</small>";
+  if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
+  body += "<div class=actions><button type=submit class=primary>Save and restart"
+          "</button></div></form>";
+  return sendShell(req, "/settings", body);
+}
+
+static esp_err_t settingsPageHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+  return sendSettings(req, "");
+}
+
+static esp_err_t settingsPostHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+
+  String body;
+  if (!readBody(req, body)) return sendSettings(req, "Bad request.");
+
+  Config stored;
+  if (!configLoad(stored)) return sendSettings(req, "No stored configuration.");
+
+  const String camname = formField(body, "camname");
+  const String otapw = formField(body, "otapw");
+  if (camname.isEmpty() || otapw.isEmpty()) {
+    return sendSettings(req, "Both fields are required.");
+  }
+
+  stored.cameraName = sanitizeHostname(camname);
+  stored.otaPassword = otapw;
+  if (!configSave(stored)) return sendSettings(req, "Could not write settings.");
+
+  // A restart rather than applying in place: mDNS and ArduinoOTA both bind their
+  // names at startup, and re-registering them live is more moving parts than a
+  // three second reboot is worth.
+  String body2 = "<h1>Saved</h1><p class=sub>Restarting. The camera will be at "
+                 "<b>http://" + htmlEscape(stored.cameraName) + ".local</b>.</p>";
+  const esp_err_t res = sendShell(req, "/settings", body2);
+  delay(1200);
+  ESP.restart();
+  return res;
 }
 
 static const char UPDATE_BODY[] = R"HTML(
@@ -346,17 +417,16 @@ static esp_err_t updatePostHandler(httpd_req_t *req) {
     return httpd_resp_send(req, "That file is too small to be firmware.", HTTPD_RESP_USE_STRLEN);
   }
 
-  // Free the camera and the stream before writing. An OTA write competing with a
-  // live stream for heap is how a half-written image happens.
+  // Ask any live stream to stop, then give it a moment to notice. The camera
+  // itself is left initialised: Update brings its own buffer, and tearing the
+  // driver down while a handler might still hold a frame buffer trades one hang
+  // for another.
   Serial.printf("web update starting, %u bytes\n", total);
-  if (streamServer) {
-    httpd_stop(streamServer);
-    streamServer = nullptr;
-  }
-  esp_camera_deinit();
-  cameraAvailable = false;
+  updating = true;
+  delay(400);
 
   if (!Update.begin(total, U_FLASH)) {
+    updating = false;
     httpd_resp_set_status(req, "500 Internal Server Error");
     return httpd_resp_send(req, Update.errorString(), HTTPD_RESP_USE_STRLEN);
   }
@@ -368,12 +438,14 @@ static esp_err_t updatePostHandler(httpd_req_t *req) {
     const int got = httpd_req_recv(req, (char *)buf, want);
     if (got <= 0) {
       Update.abort();
+      updating = false;
       httpd_resp_set_status(req, "400 Bad Request");
       return httpd_resp_send(req, "Upload interrupted.", HTTPD_RESP_USE_STRLEN);
     }
     if (Update.write(buf, got) != (size_t)got) {
       const String err = Update.errorString();
       Update.abort();
+      updating = false;
       httpd_resp_set_status(req, "500 Internal Server Error");
       return httpd_resp_send(req, err.c_str(), HTTPD_RESP_USE_STRLEN);
     }
@@ -382,6 +454,7 @@ static esp_err_t updatePostHandler(httpd_req_t *req) {
 
   if (!Update.end(true)) {
     const String err = Update.errorString();
+    updating = false;
     httpd_resp_set_status(req, "500 Internal Server Error");
     return httpd_resp_send(req, err.c_str(), HTTPD_RESP_USE_STRLEN);
   }
@@ -418,6 +491,8 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t updpage = {"/update",  HTTP_GET,  updatePageHandler, nullptr};
   httpd_uri_t updpost = {"/update",  HTTP_POST, updatePostHandler, nullptr};
   httpd_uri_t flash   = {"/flash",   HTTP_POST, flashHandler,      nullptr};
+  httpd_uri_t setpage = {"/settings", HTTP_GET,  settingsPageHandler, nullptr};
+  httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
   httpd_uri_t stream  = {"/stream",  HTTP_GET, streamHandler,  nullptr};
 
@@ -428,19 +503,25 @@ bool startWebServers(bool cameraOk) {
   cfg.stack_size = 8192;
   cfg.recv_wait_timeout = 30;
   cfg.send_wait_timeout = 30;
+
+  // Defaults to 8. Exceeding it makes httpd_register_uri_handler fail quietly,
+  // and the page simply 404s with nothing in the log to say why.
+  cfg.max_uri_handlers = 16;
   if (httpd_start(&pageServer, &cfg) != ESP_OK) {
     Serial.println("page server failed to start");
     return false;
   }
-  httpd_register_uri_handler(pageServer, &index);
-  httpd_register_uri_handler(pageServer, &login);
-  httpd_register_uri_handler(pageServer, &signin);
-  httpd_register_uri_handler(pageServer, &logout);
-  httpd_register_uri_handler(pageServer, &status);
-  httpd_register_uri_handler(pageServer, &updpage);
-  httpd_register_uri_handler(pageServer, &updpost);
-  httpd_register_uri_handler(pageServer, &flash);
-  httpd_register_uri_handler(pageServer, &capture);
+  registerUri(pageServer, &index);
+  registerUri(pageServer, &login);
+  registerUri(pageServer, &signin);
+  registerUri(pageServer, &logout);
+  registerUri(pageServer, &status);
+  registerUri(pageServer, &updpage);
+  registerUri(pageServer, &updpost);
+  registerUri(pageServer, &flash);
+  registerUri(pageServer, &setpage);
+  registerUri(pageServer, &setpost);
+  registerUri(pageServer, &capture);
 
   // The stream gets its own server because a handler that never returns occupies
   // its server's only worker task. Sharing one server would mean the page and
@@ -452,7 +533,7 @@ bool startWebServers(bool cameraOk) {
     Serial.println("stream server failed to start");
     return false;
   }
-  httpd_register_uri_handler(streamServer, &stream);
+  registerUri(streamServer, &stream);
   return true;
 }
 

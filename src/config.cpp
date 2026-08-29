@@ -1,3 +1,4 @@
+#include <MD5Builder.h>
 #include <Preferences.h>
 #include "mbedtls/pkcs5.h"
 
@@ -79,6 +80,7 @@ bool configLoad(Config &out) {
   out.adminSalt = prefs.getString("salt", "");
   out.adminHash = prefs.getString("hash", "");
   out.otaPassword = prefs.getString("otapw", "");
+  out.otaMd5 = prefs.getString("otamd5", "");
   out.configured = prefs.getBool("done", false);
   prefs.end();
 
@@ -100,6 +102,7 @@ bool configSave(const Config &cfg) {
   prefs.putString("salt", cfg.adminSalt);
   prefs.putString("hash", cfg.adminHash);
   prefs.putString("otapw", cfg.otaPassword);
+  prefs.putString("otamd5", cfg.otaMd5);
   prefs.putBool("done", true);
   prefs.end();
   return true;
@@ -187,4 +190,12 @@ void trialClear() {
     prefs.remove("boots");
     prefs.end();
   }
+}
+
+String md5Hex(const String &input) {
+  MD5Builder md5;
+  md5.begin();
+  md5.add(input);
+  md5.calculate();
+  return md5.toString();
 }

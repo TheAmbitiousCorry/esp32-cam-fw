@@ -11,7 +11,12 @@ struct Config {
   String adminUser;
   String adminSalt;  // hex
   String adminHash;  // hex, PBKDF2-HMAC-SHA256 over salt + password
-  String otaPassword;  // generated, not chosen: espota needs the plaintext
+  // ArduinoOTA authenticates with MD5 over the wire, so it cannot use the
+  // PBKDF2 verifier. This is MD5 of the admin password, captured at setup while
+  // the plaintext is briefly in hand. Weaker than adminHash by design of the OTA
+  // protocol, which is why the browser updater is the preferred path.
+  String otaMd5;
+  String otaPassword;  // legacy generated password, used when otaMd5 is unset
   bool configured = false;
 };
 
@@ -23,6 +28,7 @@ void configClear();
 // nothing if a weak password falls to a dictionary in seconds.
 String derivePasswordHash(const String &saltHex, const String &password);
 String makeSalt();
+String md5Hex(const String &input);
 bool passwordMatches(const Config &cfg, const String &password);
 
 // Counts resets that happen close together, so repeated taps on the reset button

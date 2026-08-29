@@ -169,12 +169,10 @@ if (fb) fb.onclick = async () => {
   fb.textContent = 'Flash ' + state;
   fb.className = state === 'on' ? 'on' : '';
 };
-</script>
-<nav><a href="/capture">still</a> &middot; <a href="/status">status</a> &middot; <a href="/update">update</a> &middot; <a href="/logout">sign out</a></nav>
-<script>
-  // The stream lives on its own port, so build the URL from wherever this page
-  // was served rather than hardcoding an address.
-  document.getElementById('v').src = 'http://' + location.hostname + ':81/stream';
+
+// The stream lives on its own port, so build the URL from wherever this page was
+// served rather than hardcoding an address.
+document.getElementById('v').src = 'http://' + location.hostname + ':81/stream';
 </script>
 )HTML";
 
@@ -291,13 +289,14 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   row("Firmware", String(FIRMWARE_VERSION));
   row("Built", String(__DATE__) + " " + __TIME__);
 
+  esp_ota_img_states_t otaState = ESP_OTA_IMG_VALID;
+  if (running) esp_ota_get_state_partition(running, &otaState);
+  row("Update status", otaState == ESP_OTA_IMG_PENDING_VERIFY
+                           ? "on trial, reverts if it reboots unconfirmed"
+                           : "confirmed");
+
   TrialState trial;
   trialLoad(trial);
-  if (!trial.pendingPartition.isEmpty()) {
-    row("Update status", "on trial, boot " + String(trial.boots) + " of 3");
-  } else {
-    row("Update status", "confirmed");
-  }
   if (!trial.rolledBackFrom.isEmpty()) {
     row("Last rollback", "reverted from " + trial.rolledBackFrom);
   }
@@ -393,7 +392,6 @@ static esp_err_t updatePostHandler(httpd_req_t *req) {
     trialLoad(trial);
     trial.pendingPartition = target->label;
     trial.pendingVersion = "uploaded " + String(__DATE__) + " " + __TIME__;
-    trial.boots = 0;
     trialSave(trial);
   }
 

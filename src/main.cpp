@@ -13,8 +13,13 @@
 
 // Retry cadence after a drop. Backing off keeps a long outage from hammering the
 // radio, and the reboot is a last resort for the states a reconnect cannot clear.
-// Three taps of the reset button in quick succession wipes stored settings and
-// returns the camera to setup mode, reachable through a pinhole in the housing.
+// Three presses of the reset button wipes stored settings and returns the camera
+// to setup mode, reachable through a pinhole in the housing.
+//
+// The gesture that actually works on this hardware is press and hold for about a
+// second, release, pause a second, three times. A light tap does not hold the
+// enable line low long enough to reset the chip, so the press never becomes a
+// boot and the counter never sees it. Found the hard way.
 // The window is short on purpose: a power supply that drops out repeatedly looks
 // identical to someone at the pinhole, and five seconds is hard to hit by
 // accident while still being comfortable to do deliberately. Brownouts are
@@ -23,12 +28,10 @@
 #define FIRMWARE_VERSION "unknown"
 #endif
 
-// A freshly uploaded image gets this many attempts to prove it can reach the
-// network before the previous slot is restored.
-static constexpr int TRIAL_BOOTS = 3;
-
 static constexpr int RESET_PRESSES = 3;
 static constexpr unsigned long RESET_WINDOW_MS = 5000;
+
+extern "C" bool verifyRollbackLater() { return true; }
 
 static Config cfg;
 static bool portalMode = false;
@@ -181,7 +184,11 @@ static void ensureWifi() {
     if (!serversStarted && startWebServers(cameraReady)) {
       serversStarted = true;
       if (onTrial) {
-        Serial.printf("firmware %s confirmed, trial over\n", FIRMWARE_VERSION);
+        // Reaching the network with the servers answering is the only property
+        // that decides whether a bad update needs a ladder. Nothing weaker
+        // counts as proof.
+        esp_ota_mark_app_valid_cancel_rollback();
+        Serial.printf("firmware %s confirmed\n", FIRMWARE_VERSION);
         trialClear();
         onTrial = false;
       }
@@ -278,31 +285,24 @@ void setup() {
   // Only an image that was uploaded and has not yet proven itself is a rollback
   // candidate. Firmware that has worked once stays trusted, so a failing power
   // supply cannot revert a perfectly good build.
-  trialLoad(trial);
-  onTrial = (trial.pendingPartition == slot);
-  if (onTrial) {
-    trial.boots++;
-    Serial.printf("firmware on trial, boot %d of %d\n", trial.boots, TRIAL_BOOTS);
+  // The bootloader marks a freshly written image PENDING_VERIFY. If it reboots
+  // without being confirmed, the previous slot is restored automatically, so a
+  // hang or a crash recovers on its own rather than needing a cable.
+  esp_ota_img_states_t otaState = ESP_OTA_IMG_VALID;
+  if (running) esp_ota_get_state_partition(running, &otaState);
+  onTrial = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
 
-    if (trial.boots > TRIAL_BOOTS) {
-      const esp_partition_t *previous = esp_ota_get_next_update_partition(nullptr);
-      if (previous) {
-        Serial.printf("rolling back to %s after %d failed boots\n",
-                      previous->label, TRIAL_BOOTS);
-        trial.rolledBackFrom = trial.pendingVersion;
-        trial.pendingPartition = "";
-        trial.pendingVersion = "";
-        trial.boots = 0;
-        trialSave(trial);
-        esp_ota_set_boot_partition(previous);
-        Serial.flush();
-        ESP.restart();
-      } else {
-        Serial.println("no partition to roll back to");
-      }
-    }
+  trialLoad(trial);
+  if (!trial.pendingPartition.isEmpty() && trial.pendingPartition != slot) {
+    // Booting a different slot than the one we wrote means the bootloader
+    // reverted it. That is the only record of what failed, so keep it.
+    Serial.printf("rolled back: %s did not confirm\n", trial.pendingVersion.c_str());
+    trial.rolledBackFrom = trial.pendingVersion;
+    trial.pendingPartition = "";
+    trial.pendingVersion = "";
     trialSave(trial);
   }
+  if (onTrial) Serial.println("firmware on trial, not yet confirmed");
 
   configLoad(cfg);
 

@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <ArduinoOTA.h>
+#include "esp_ota_ops.h"
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include "mbedtls/base64.h"
@@ -9,6 +11,10 @@
 
 // Retry cadence after a drop. Backing off keeps a long outage from hammering the
 // radio, and the reboot is a last resort for the states a reconnect cannot clear.
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD ""
+#endif
+
 static constexpr unsigned long RETRY_MIN_MS = 5000;
 static constexpr unsigned long RETRY_MAX_MS = 60000;
 static constexpr unsigned long REBOOT_AFTER_OFFLINE_MS = 10UL * 60UL * 1000UL;
@@ -79,6 +85,42 @@ static bool resolveSsid() {
   return true;
 }
 
+
+// Started only once the link is up, because ArduinoOTA binds to the network
+// interface. The camera and both servers are torn down before the write begins:
+// an OTA flash competing with a live MJPEG stream for heap is how a half-written
+// image happens.
+static void startOta() {
+  ArduinoOTA.setHostname(MDNS_HOSTNAME);
+  if (strlen(OTA_PASSWORD) > 0) {
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+  } else {
+    Serial.println("WARNING: no OTA_PASSWORD set, anyone on this network can reflash");
+  }
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("\nOTA starting, shutting down camera and servers");
+    stopWebServers();
+    serversStarted = false;
+    esp_camera_deinit();
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    static int lastPct = -1;
+    const int pct = total ? (done * 100) / total : 0;
+    if (pct != lastPct && pct % 10 == 0) {
+      Serial.printf("OTA %d%%\n", pct);
+      lastPct = pct;
+    }
+  });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA done, rebooting into the new slot"); });
+  ArduinoOTA.onError([](ota_error_t err) {
+    Serial.printf("OTA failed (%u). The running firmware is untouched, reboot to recover\n", err);
+  });
+
+  ArduinoOTA.begin();
+  Serial.printf("OTA ready on %s.local\n", MDNS_HOSTNAME);
+}
+
 // Non-blocking. Called every pass, does nothing while the link is healthy, and
 // drives reconnection when it is not. Nothing here waits, so the camera keeps
 // serving frames to anyone still connected while the radio sorts itself out.
@@ -102,6 +144,12 @@ static void ensureWifi() {
     }
     offlineSince = 0;
     retryDelay = RETRY_MIN_MS;
+
+    static bool otaStarted = false;
+    if (!otaStarted) {
+      startOta();
+      otaStarted = true;
+    }
 
     if (!serversStarted && startWebServers()) {
       serversStarted = true;
@@ -180,6 +228,11 @@ void setup() {
   Serial.printf("PSRAM: %s (%u bytes free)\n",
                 psramFound() ? "found" : "MISSING", ESP.getFreePsram());
 
+  // Which of the two OTA slots is executing. This flipping from app0 to app1 is
+  // the only direct evidence that an over-the-air update actually took.
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  Serial.printf("running from partition: %s\n", running ? running->label : "unknown");
+
   if (!cameraInit()) return;
 
   // The network is brought up but not waited for. ensureWifi() takes it from
@@ -212,6 +265,7 @@ void loop() {
   }
 
   ensureWifi();
+  ArduinoOTA.handle();
 
   static unsigned long lastReport = 0;
   if (millis() - lastReport > 15000) {

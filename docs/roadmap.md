@@ -9,13 +9,6 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-- **Firmware updates without physical access**: an inserted SD card holds GPIO2
-  high and blocks USB flashing entirely, so every iteration on the recording code
-  costs a card removal and reinsertion. Why now: the storage work below is many
-  cycles of exactly that, and OTA needs a dual-slot partition table, which is free
-  to change now and requires erasing the card's companion device later.
-  Domains: network. Appetite: small.
-
 - **Footage survives on the SD card and can be played back**: stated goal, and the
   half of "security camera" that outlives a power cut. Why now: motion detection is
   worth nothing until there is somewhere for a trigger to write to, so storage

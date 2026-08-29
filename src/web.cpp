@@ -107,3 +107,14 @@ bool startWebServers() {
   httpd_register_uri_handler(streamServer, &stream);
   return true;
 }
+
+void stopWebServers() {
+  if (streamServer) {
+    httpd_stop(streamServer);
+    streamServer = nullptr;
+  }
+  if (pageServer) {
+    httpd_stop(pageServer);
+    pageServer = nullptr;
+  }
+}

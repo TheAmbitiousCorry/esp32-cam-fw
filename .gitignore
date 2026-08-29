@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+.cache/
+*.jpg
+src/secrets.h
+compile_commands.json
+.clangd

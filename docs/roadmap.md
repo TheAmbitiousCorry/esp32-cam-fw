@@ -9,24 +9,7 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-- **The camera is set up without editing code**: on first boot it serves a setup
-  page over its own access point, where the network and an admin password are
-  chosen once and stored on the device. Why now: credentials currently live in a
-  compiled-in header, so the camera cannot move to another network, or be handed
-  to anyone, without a toolchain and a cable. Everything after this inherits that
-  limitation until it is fixed. Domains: config, network, web. Appetite: large.
-
-- **The web interface requires a login**: the stream, stills, and settings sit
-  behind the admin password rather than being open to the network. Why now:
-  recording is the next item, and an open interface holding stored footage is a
-  materially worse exposure than one showing only a live view. Domains: web.
-  Appetite: small.
-
-- **Firmware updates happen from a browser**: a signed-in user uploads a build
-  from a page, with no toolchain involved. Why now: the current path needs
-  PlatformIO, a pinned host port, and a hand-written firewall rule, which is not
-  something that can be handed to anyone else. Domains: web, network.
-  Appetite: small.
+_Empty. The next item comes from Next._
 
 ## Next
 

@@ -6,14 +6,35 @@
 #include "mbedtls/base64.h"
 
 #include "camera.h"
+#include "config.h"
+#include "portal.h"
 #include "secrets.h"
 #include "web.h"
 
 // Retry cadence after a drop. Backing off keeps a long outage from hammering the
 // radio, and the reboot is a last resort for the states a reconnect cannot clear.
-#ifndef OTA_PASSWORD
-#define OTA_PASSWORD ""
+// Three taps of the reset button in quick succession wipes stored settings and
+// returns the camera to setup mode, reachable through a pinhole in the housing.
+// The window is short on purpose: a power supply that drops out repeatedly looks
+// identical to someone at the pinhole, and five seconds is hard to hit by
+// accident while still being comfortable to do deliberately. Brownouts are
+// excluded from the count for the same reason.
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "unknown"
 #endif
+
+// A freshly uploaded image gets this many attempts to prove it can reach the
+// network before the previous slot is restored.
+static constexpr int TRIAL_BOOTS = 3;
+
+static constexpr int RESET_PRESSES = 3;
+static constexpr unsigned long RESET_WINDOW_MS = 5000;
+
+static Config cfg;
+static bool portalMode = false;
+static bool cameraReady = false;
+static TrialState trial;
+static bool onTrial = false;
 
 static constexpr unsigned long RETRY_MIN_MS = 5000;
 static constexpr unsigned long RETRY_MAX_MS = 60000;
@@ -52,10 +73,10 @@ static void onWifiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
 // nothing in a config file or a scan listing shows them. Match on the trimmed
 // name, then keep whatever exact string the radio actually reported.
 static bool resolveSsid() {
-  Serial.printf("scanning for [%s]\n", WIFI_SSID);
+  Serial.printf("scanning for [%s]\n", cfg.wifiSsid.c_str());
   const int found = WiFi.scanNetworks();
 
-  String want = WIFI_SSID;
+  String want = cfg.wifiSsid;
   want.trim();
 
   int best = -1;
@@ -76,9 +97,9 @@ static bool resolveSsid() {
   }
 
   apSsid = WiFi.SSID(best);
-  if (apSsid != WIFI_SSID) {
-    Serial.printf("  AP broadcasts [%s], config says [%s]. Using the AP's.\n",
-                  apSsid.c_str(), WIFI_SSID);
+  if (apSsid != cfg.wifiSsid) {
+    Serial.printf("  AP broadcasts [%s], stored config says [%s]. Using the AP's.\n",
+                  apSsid.c_str(), cfg.wifiSsid.c_str());
   }
   Serial.printf("  found on ch%d at %d dBm\n", WiFi.channel(best), bestRssi);
   WiFi.scanDelete();
@@ -91,12 +112,17 @@ static bool resolveSsid() {
 // an OTA flash competing with a live MJPEG stream for heap is how a half-written
 // image happens.
 static void startOta() {
-  ArduinoOTA.setHostname(MDNS_HOSTNAME);
-  if (strlen(OTA_PASSWORD) > 0) {
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-  } else {
-    Serial.println("WARNING: no OTA_PASSWORD set, anyone on this network can reflash");
+  ArduinoOTA.setHostname(cfg.cameraName.c_str());
+
+  // Generated rather than chosen, because espota needs the plaintext and the
+  // admin password is deliberately only stored as a hash. Readable from the
+  // status page once signed in.
+  if (cfg.otaPassword.isEmpty()) {
+    cfg.otaPassword = makeSalt().substring(0, 12);
+    configSave(cfg);
+    Serial.println("generated an OTA password, see the status page");
   }
+  ArduinoOTA.setPassword(cfg.otaPassword.c_str());
 
   ArduinoOTA.onStart([]() {
     Serial.println("\nOTA starting, shutting down camera and servers");
@@ -118,7 +144,7 @@ static void startOta() {
   });
 
   ArduinoOTA.begin();
-  Serial.printf("OTA ready on %s.local\n", MDNS_HOSTNAME);
+  Serial.printf("OTA ready on %s.local\n", cfg.cameraName.c_str());
 }
 
 // Non-blocking. Called every pass, does nothing while the link is healthy, and
@@ -130,17 +156,18 @@ static void ensureWifi() {
       everConnected = true;
       Serial.printf("wifi up, %s, RSSI %d dBm\n",
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
-      if (MDNS.begin(MDNS_HOSTNAME)) MDNS.addService("http", "tcp", 80);
+      if (MDNS.begin(cfg.cameraName.c_str())) MDNS.addService("http", "tcp", 80);
     } else if (offlineSince != 0) {
       // The first connect is not a reconnect. Counting it would put a permanent
       // off-by-one into the only number that says whether the link is healthy.
       reconnectCount++;
+      webSetReconnects(reconnectCount);
       Serial.printf("wifi back after %lus, %s (reconnect #%u)\n",
                     (millis() - offlineSince) / 1000,
                     WiFi.localIP().toString().c_str(), reconnectCount);
       // mDNS loses its registration across a link drop and has to be restarted.
       MDNS.end();
-      if (MDNS.begin(MDNS_HOSTNAME)) MDNS.addService("http", "tcp", 80);
+      if (MDNS.begin(cfg.cameraName.c_str())) MDNS.addService("http", "tcp", 80);
     }
     offlineSince = 0;
     retryDelay = RETRY_MIN_MS;
@@ -151,10 +178,15 @@ static void ensureWifi() {
       otaStarted = true;
     }
 
-    if (!serversStarted && startWebServers()) {
+    if (!serversStarted && startWebServers(cameraReady)) {
       serversStarted = true;
+      if (onTrial) {
+        Serial.printf("firmware %s confirmed, trial over\n", FIRMWARE_VERSION);
+        trialClear();
+        onTrial = false;
+      }
       Serial.printf("ready. open http://%s or http://%s.local\n",
-                    WiFi.localIP().toString().c_str(), MDNS_HOSTNAME);
+                    WiFi.localIP().toString().c_str(), cfg.cameraName.c_str());
     }
     return;
   }
@@ -180,7 +212,7 @@ static void ensureWifi() {
 
   Serial.printf("connecting to [%s]...\n", apSsid.c_str());
   WiFi.disconnect();
-  WiFi.begin(apSsid.c_str(), WIFI_PASS);
+  WiFi.begin(apSsid.c_str(), cfg.wifiPass.c_str());
   retryDelay = min(retryDelay * 2, RETRY_MAX_MS);
 }
 
@@ -221,28 +253,110 @@ static void dumpBase64(const camera_fb_t *fb) {
 }
 
 void setup() {
+  // Reset accounting runs first. None of it needs the serial port, and sitting
+  // behind a two second delay meant a press only registered 2.4s after the
+  // button, leaving barely half the window usable and no way to tell.
+  const esp_reset_reason_t why = esp_reset_reason();
+  int presses = 0;
+  if (why == ESP_RST_POWERON || why == ESP_RST_EXT) {
+    presses = bumpBootCounter();
+  } else {
+    clearBootCounter();  // an OTA reboot or a panic is not someone at the button
+  }
+  const bool factoryReset = (presses >= RESET_PRESSES);
+  webSetBootPress(presses, RESET_PRESSES);
+
   Serial.begin(115200);
   delay(2000);  // USB-TTL adapters routinely swallow the first output
   Serial.println();
+  Serial.printf("reset reason %d, press %d of %d\n", (int)why, presses, RESET_PRESSES);
+
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const String slot = running ? running->label : "unknown";
+  Serial.printf("firmware %s from partition %s\n", FIRMWARE_VERSION, slot.c_str());
+
+  // Only an image that was uploaded and has not yet proven itself is a rollback
+  // candidate. Firmware that has worked once stays trusted, so a failing power
+  // supply cannot revert a perfectly good build.
+  trialLoad(trial);
+  onTrial = (trial.pendingPartition == slot);
+  if (onTrial) {
+    trial.boots++;
+    Serial.printf("firmware on trial, boot %d of %d\n", trial.boots, TRIAL_BOOTS);
+
+    if (trial.boots > TRIAL_BOOTS) {
+      const esp_partition_t *previous = esp_ota_get_next_update_partition(nullptr);
+      if (previous) {
+        Serial.printf("rolling back to %s after %d failed boots\n",
+                      previous->label, TRIAL_BOOTS);
+        trial.rolledBackFrom = trial.pendingVersion;
+        trial.pendingPartition = "";
+        trial.pendingVersion = "";
+        trial.boots = 0;
+        trialSave(trial);
+        esp_ota_set_boot_partition(previous);
+        Serial.flush();
+        ESP.restart();
+      } else {
+        Serial.println("no partition to roll back to");
+      }
+    }
+    trialSave(trial);
+  }
+
+  configLoad(cfg);
+
+  if (factoryReset) {
+    Serial.println("reset pressed three times, clearing stored settings");
+    clearBootCounter();
+    configClear();
+    cfg = Config();
+  }
+
+  // No stored network means there is nothing to join and nobody to authenticate,
+  // so the only useful thing the camera can do is ask. The camera itself stays
+  // uninitialised: setup needs the radio and the memory, not frames.
+  if (!cfg.configured) {
+    portalMode = true;
+    if (!startSetupPortal()) {
+      Serial.println("could not start setup portal, restarting");
+      delay(2000);
+      ESP.restart();
+    }
+    return;
+  }
 
   Serial.printf("PSRAM: %s (%u bytes free)\n",
                 psramFound() ? "found" : "MISSING", ESP.getFreePsram());
 
-  // Which of the two OTA slots is executing. This flipping from app0 to app1 is
-  // the only direct evidence that an over-the-air update actually took.
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  Serial.printf("running from partition: %s\n", running ? running->label : "unknown");
+  // A camera fault must not take the network down with it. Staying reachable is
+  // what makes the difference between diagnosing this over the air and going
+  // back to the cable with the SD card out.
+  flashInit();
+  cameraReady = cameraInit();
+  if (!cameraReady) {
+    Serial.println("CAMERA FAULT: sensor did not respond. Check the ribbon cable.");
+    Serial.println("Continuing without it so the camera stays reachable.");
+  }
 
-  if (!cameraInit()) return;
-
-  // The network is brought up but not waited for. ensureWifi() takes it from
-  // here, so a router that is down at boot delays the camera rather than
-  // ending the run, which is the same path a mid-flight drop takes.
   startWifi();
   Serial.println("send 'p' for a frame, 'd' to force a wifi drop");
 }
 
 void loop() {
+  // Running this long means nobody is at the pinhole, so the tap count resets.
+  static bool windowClosed = false;
+  if (!windowClosed && millis() > RESET_WINDOW_MS) {
+    clearBootCounter();
+    windowClosed = true;
+  }
+
+  if (portalMode) {
+    portalLoop();
+    delay(5);
+    return;
+  }
+
   // Serial capture is kept as a fallback for when the network is the thing that
   // is broken, which is exactly when the browser view is no help.
   bool wantDump = false;

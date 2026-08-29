@@ -72,3 +72,24 @@ bool isCompleteJpeg(const camera_fb_t *fb) {
   const bool eoi = fb->buf[fb->len - 2] == 0xFF && fb->buf[fb->len - 1] == 0xD9;
   return soi && eoi;
 }
+
+// Timer 0 and channel 0 belong to the camera's XCLK, so the flash takes its own.
+static constexpr int FLASH_LEDC_CHANNEL = 2;
+static constexpr int FLASH_LEDC_FREQ = 5000;
+static constexpr int FLASH_LEDC_BITS = 8;
+static constexpr int FLASH_DUTY_ON = 60;  // out of 255; full duty washes out anything close
+
+static bool flashOn = false;
+
+void flashInit() {
+  ledcAttachChannel(LED_GPIO_NUM, FLASH_LEDC_FREQ, FLASH_LEDC_BITS, FLASH_LEDC_CHANNEL);
+  ledcWrite(LED_GPIO_NUM, 0);
+  flashOn = false;
+}
+
+void flashSet(bool on) {
+  flashOn = on;
+  ledcWrite(LED_GPIO_NUM, on ? FLASH_DUTY_ON : 0);
+}
+
+bool flashIsOn() { return flashOn; }

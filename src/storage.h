@@ -39,7 +39,10 @@ int sdListRoot(SdEntry *out, int max, int *totalFound);
 // Lists any directory, not just the root. Paths are rejected unless they start
 // with a slash and contain no "..", so a crafted request cannot walk outside
 // the card.
-int sdList(const String &path, SdEntry *out, int max, int *totalFound);
+// startAt skips that many entries, so a directory larger than the page can be
+// walked rather than truncated.
+int sdList(const String &path, SdEntry *out, int max, int *totalFound, int startAt = 0);
+bool sdMkdir(const String &path);
 bool sdPathIsSafe(const String &path);
 bool sdExists(const String &path);
 

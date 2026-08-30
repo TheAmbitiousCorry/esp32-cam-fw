@@ -18,3 +18,8 @@ String clockNow();
 
 // "20260830-041532", safe for a filename and sorting chronologically as text.
 String clockStamp();
+
+// "2026-08-30" and "041532". Recordings live in a directory per day, so a day
+// with hundreds of them does not make a directory nobody can list.
+String clockDate();
+String clockTime();

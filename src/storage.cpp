@@ -89,6 +89,11 @@ uint64_t sdUsedBytes() {
   return mounted ? cachedUsed : 0;
 }
 
+bool sdMkdir(const String &path) {
+  if (!mounted || !sdPathIsSafe(path)) return false;
+  return SD_MMC.exists(path) || SD_MMC.mkdir(path);
+}
+
 bool sdExists(const String &path) {
   return mounted && sdPathIsSafe(path) && SD_MMC.exists(path);
 }
@@ -99,7 +104,7 @@ bool sdPathIsSafe(const String &path) {
   return true;
 }
 
-int sdList(const String &path, SdEntry *out, int max, int *totalFound) {
+int sdList(const String &path, SdEntry *out, int max, int *totalFound, int startAt) {
   if (totalFound) *totalFound = 0;
   if (!mounted || !sdPathIsSafe(path)) return 0;
 
@@ -109,7 +114,7 @@ int sdList(const String &path, SdEntry *out, int max, int *totalFound) {
   int written = 0, seen = 0;
   for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
     seen++;
-    if (written < max) {
+    if (seen > startAt && written < max) {
       out[written].name = entry.name();
       out[written].path = entry.path();
       out[written].size = entry.size();
@@ -124,29 +129,7 @@ int sdList(const String &path, SdEntry *out, int max, int *totalFound) {
 }
 
 int sdListRoot(SdEntry *out, int max, int *totalFound) {
-  if (totalFound) *totalFound = 0;
-  if (!mounted) return 0;
-
-  File root = SD_MMC.open("/");
-  if (!root || !root.isDirectory()) return 0;
-
-  int written = 0;
-  int seen = 0;
-  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
-    seen++;
-    if (written < max) {
-      out[written].name = entry.name();
-      out[written].path = entry.path();
-      out[written].size = entry.size();
-      out[written].isDir = entry.isDirectory();
-      written++;
-    }
-    entry.close();
-  }
-  root.close();
-
-  if (totalFound) *totalFound = seen;
-  return written;
+  return sdList("/", out, max, totalFound, 0);
 }
 
 static constexpr int MAX_DELETE_DEPTH = 8;

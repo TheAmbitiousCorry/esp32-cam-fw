@@ -63,9 +63,17 @@ bool recordingStart(uint32_t seconds) {
   // A timestamp names the recording after when it happened and sorts
   // chronologically as text. A counter says nothing about either, so it is only
   // the fallback for a camera that has not reached an NTP server yet.
-  char name[48];
+  // A directory per day. A flat directory of every recording ever made becomes
+  // unlistable within a week of motion triggering, and grouping by day is what
+  // the date filter already wants.
+  char name[64];
   if (clockSynced()) {
-    snprintf(name, sizeof(name), "%s/%s", REC_ROOT, clockStamp().c_str());
+    const String dayDir = String(REC_ROOT) + "/" + clockDate();
+    if (!sdMkdir(dayDir)) {
+      Serial.printf("recording: could not create %s\n", dayDir.c_str());
+      return false;
+    }
+    snprintf(name, sizeof(name), "%s/%s", dayDir.c_str(), clockTime().c_str());
   } else {
     snprintf(name, sizeof(name), "%s/%lu", REC_ROOT, (unsigned long)nextRecordingNumber());
   }

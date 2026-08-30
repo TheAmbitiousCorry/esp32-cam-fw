@@ -35,3 +35,5 @@ static String formatted(const char *fmt) {
 
 String clockNow() { return formatted("%Y-%m-%d %H:%M:%S"); }
 String clockStamp() { return formatted("%Y%m%d-%H%M%S"); }
+String clockDate() { return formatted("%Y-%m-%d"); }
+String clockTime() { return formatted("%H%M%S"); }

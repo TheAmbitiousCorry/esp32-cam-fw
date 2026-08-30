@@ -940,134 +940,104 @@ static String queryParam(httpd_req_t *req, const char *key, const String &fallba
 static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   String path = queryParam(req, "path", "/");
   if (!sdPathIsSafe(path)) path = "/";
+  const int startAt = max(0L, queryParam(req, "start", "0").toInt());
+
+  // /rec holds a directory per day; a day holds recordings. Both are rendered
+  // with the punctuation put back, since the names are stored without it.
+  const bool atRecRoot = (path == "/rec");
+  const bool inDay = path.startsWith("/rec/") && path.length() == 15;
 
   String body = "<h1>Files</h1>";
-  body += "<p class=sub>" + htmlEscape(path) + "</p>";
-  if (path != "/") {
-    int cut = path.lastIndexOf('/');
-    const String parent = cut <= 0 ? "/" : path.substring(0, cut);
-    body += "<div class=actions><a class=btn href=\"/files?path=" +
-            htmlEscape(parent) + "\">Up</a></div>";
-  }
   if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
+  body += "<p class=sub>" + htmlEscape(path) + "</p>";
 
   if (!sdMounted()) {
     body += "<p class=err>No SD card detected.</p>";
     return sendShell(req, "/files", body);
   }
 
-  static constexpr int MAX_LISTED = 64;
-  SdEntry entries[MAX_LISTED];
-  int total = 0;
-  const int shown = sdList(path, entries, MAX_LISTED, &total);
+  String nav;
+  if (path != "/") {
+    int cut = path.lastIndexOf('/');
+    const String parent = cut <= 0 ? "/" : path.substring(0, cut);
+    nav += "<a class=btn href=\"/files?path=" + htmlEscape(parent) + "\">" +
+           icon("up") + "Up</a>";
+  }
+  if (!nav.isEmpty()) body += "<div class=actions>" + nav + "</div>";
 
-  const uint64_t freeMb = (sdTotalBytes() - sdUsedBytes()) / (1024ULL * 1024ULL);
-  body += "<p class=sub>" + String((uint32_t)(sdTotalBytes() / (1024ULL * 1024ULL))) +
-          " MB card, " + String((uint32_t)freeMb) + " MB free.</p>";
+  // Jumping to a date is navigation, not filtering: days are directories.
+  if (atRecRoot) {
+    body += "<form method=get action=/files class=actions>"
+            "<input type=hidden name=path value=/rec>"
+            "<input type=date id=day style=\"width:auto\">"
+            "<button type=button id=go>Go to date</button></form>"
+            "<script>document.getElementById('go').onclick = () => {"
+            "const d = document.getElementById('day').value;"
+            "if (d) location = '/files?path=/rec/' + d; };</script>";
+  }
+
+  static constexpr int PAGE = 50;
+  SdEntry entries[PAGE];
+  int total = 0;
+  const int shown = sdList(path, entries, PAGE, &total, startAt);
 
   if (total == 0) {
     body += "<p class=sub>Nothing here.</p>";
     return sendShell(req, "/files", body);
   }
 
-  // Inside /rec the entries are recordings, so offer a date filter and show the
-  // names as dates rather than as the strings they are stored under.
-  const bool inRecordings = (path == "/rec");
-  // Recordings are named YYYYMMDD-HHMMSS, so a text prefix match is a date
-  // filter. No parsing, and it sorts chronologically for free.
-  const String from = queryParam(req, "from", "");
-  const String fromTime = queryParam(req, "time", "");
-  String wanted;
-  if (from.length() == 10) {
-    wanted = from.substring(0, 4) + from.substring(5, 7) + from.substring(8, 10);
-    if (fromTime.length() >= 5) {
-      wanted += "-" + fromTime.substring(0, 2) + fromTime.substring(3, 5);
-    }
-  }
-
-  body += "";
-  body += "<form method=get action=/recording class=actions>"
-          "<input type=hidden name=path value=/rec>"
-          "<input type=date name=from value=\"" + htmlEscape(from) +
-          "\" style=\"width:auto\">"
-          "<input type=time name=time value=\"" + htmlEscape(fromTime) +
-          "\" style=\"width:auto\">"
-          "<button type=submit>Filter</button>"
-          "<a class=btn href=\"/files?path=/rec\">Clear</a></form>";
-
-    int matched = 0;
-  String rows;
-  for (int i = 0; i < shown; i++) {
-    if (!entries[i].isDir) continue;
-    if (wanted.length() && !entries[i].name.startsWith(wanted)) continue;
-    matched++;
-
-    // 20260830-041532 reads as a date once the punctuation is put back.
-    String when = entries[i].name;
-    if (when.length() == 15 && when[8] == '-') {
-      when = when.substring(0, 4) + "-" + when.substring(4, 6) + "-" +
-             when.substring(6, 8) + "  " + when.substring(9, 11) + ":" +
-             when.substring(11, 13) + ":" + when.substring(13, 15);
-    }
-    rows += "<tr><th>" + icon("dot") + htmlEscape(when) + "</th><td>"
-            "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
-            htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a></td></tr>";
-  }
-
-  if (matched == 0) {
-    body += "<p class=sub>" +
-            String(wanted.length() ? "Nothing recorded then." : "No recordings yet.") +
-            "</p>";
-  } else {
-    body += "<table>" + rows + "</table>";
-    if (total > shown) {
-      body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
-    }
-  }
-
-  if (inRecordings && matched >= 0) {
-    body += "<table>" + rows + "</table>";
-    if (total > shown) {
-      body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
-    }
-    body += "<form method=post action=/files><div class=actions>"
-            "<a class=btn href=\"/files?path=/\">" + icon("up") + "All files</a>"
-            "</div></form>";
-    return sendShell(req, "/files", body);
-  }
-
   body += "<form method=post action=/files><table>";
   for (int i = 0; i < shown; i++) {
-    const String size = entries[i].isDir
-                            ? String("")
-                            : String((uint32_t)(entries[i].size / 1024)) + " KB";
-    String label = icon(entries[i].isDir ? "folder" : "image") +
-                   htmlEscape(entries[i].name);
-    if (entries[i].isDir) {
-      label = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + label + "</a>";
+    String label = entries[i].name;
+    String action;
+
+    if (inDay && label.length() == 6) {
+      // 041541 is a time of day once the colons are put back.
+      label = label.substring(0, 2) + ":" + label.substring(2, 4) + ":" +
+              label.substring(4, 6);
     }
 
-    String extra;
-    // A directory holding a video file is a recording, so offer to play it.
     if (entries[i].isDir && sdExists(entries[i].path + "/video.mjpeg")) {
-      extra = " <a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
-              htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
+      action = "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
+               htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
     }
+
+    String cell = icon(entries[i].isDir ? "folder" : "image") + htmlEscape(label);
+    if (entries[i].isDir) {
+      cell = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + cell + "</a>";
+    }
+
+    const String size = entries[i].isDir
+                            ? action
+                            : String((uint32_t)(entries[i].size / 1024)) + " KB";
 
     body += "<tr><td style=\"padding-right:12px\">"
             "<input type=checkbox name=f value=\"" + htmlEscape(entries[i].path) +
             "\" style=\"width:auto\"></td>"
-            "<th>" + label + "</th>"
-            "<td>" + size + extra + "</td></tr>";
+            "<th>" + cell + "</th><td>" + size + "</td></tr>";
   }
   body += "</table>";
-  if (total > shown) {
-    body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
+
+  // Paging rather than a silent cap. A truncated list that does not say so reads
+  // as missing footage.
+  if (total > PAGE) {
+    body += "<div class=actions>";
+    if (startAt > 0) {
+      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + "&start=" +
+              String(max(0, startAt - PAGE)) + "\">Previous</a>";
+    }
+    if (startAt + shown < total) {
+      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + "&start=" +
+              String(startAt + PAGE) + "\">Next</a>";
+    }
+    body += "<span class=sub style=\"align-self:center\">" + String(startAt + 1) +
+            " to " + String(startAt + shown) + " of " + String(total) + "</span></div>";
   }
+
   body += "<div class=actions>"
           "<button type=button id=all>Select all</button>"
-          "<button type=submit id=del>" + icon("trash") +
-          "Delete selected</button></div></form>";
+          "<button type=submit id=del>" + icon("trash") + "Delete selected</button>"
+          "</div></form>";
 
   body += R"HTML(<script>
 const boxes = () => [...document.querySelectorAll('input[name=f]')];
@@ -1075,8 +1045,6 @@ document.getElementById('all').onclick = () => {
   const target = !boxes().every(b => b.checked);
   boxes().forEach(b => { b.checked = target; });
 };
-// Not protection, just a guard against a misclick on a page that will later
-// list footage rather than test files.
 document.getElementById('del').onclick = e => {
   const n = boxes().filter(b => b.checked).length;
   if (n === 0) { e.preventDefault(); return; }

@@ -127,6 +127,10 @@ static const char SHARED_CSS[] =
     "button.primary{background:#2a7;border-color:#2a7;color:#04140d;font-weight:600}"
     "p.sub{color:#999;font-size:13px;max-width:460px}"
     ".err{color:#f77;font-size:13px}"
+    "#rec svg{transition:color .2s}"
+    ".dot-rec{color:#f55}.dot-armed{color:#2a7}.dot-off{color:#777}"
+    "#recstats{color:#999;font-size:13px;margin:6px 0 0;"
+    "font-variant-numeric:tabular-nums;min-height:18px}"
     "table{border-collapse:collapse;font-size:14px}"
     "th{text-align:left;color:#999;font-weight:400;padding:6px 22px 6px 0;white-space:nowrap}"
     "td{padding:6px 0;font-variant-numeric:tabular-nums}"
@@ -262,33 +266,39 @@ static const char INDEX_BODY[] = R"HTML(<div class=zoomwrap id=zw><img id="v" al
 const rb = document.getElementById('rec');
 let recPoll = null;
 
-const ms = document.getElementById('motionstate');
+const dot = document.getElementById('recdot');
+const pct = document.getElementById('recpct');
+const stats = document.getElementById('recstats');
 
 async function refreshRec() {
   const s = await (await fetch('/record')).json();
 
+  // Colour carries the state; the numbers carry the detail. A sentence needed
+  // reading, and the thing you want at a glance is whether it is recording.
   if (s.active) {
-    rb.textContent = 'Recording  ' + s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps';
+    dot.className = 'dot-rec';
     rb.className = 'on';
+  } else if (s.motion && s.armed) {
+    dot.className = 'dot-armed';
+    rb.className = '';
   } else {
-    rb.textContent = 'Record';
+    dot.className = 'dot-off';
     rb.className = '';
   }
 
-  if (ms) {
-    if (s.active && s.triggered) {
-      ms.textContent = 'Motion recording in progress. Continues until the scene is still.';
-    } else if (s.active) {
-      ms.textContent = 'Recording, started by hand.';
-    } else if (!s.motion) {
-      ms.textContent = 'Motion recording is off.';
-    } else if (!s.armed) {
-      ms.textContent = 'Motion recording is outside its schedule. Currently seeing ' +
-                       s.change + '% change.';
-    } else {
-      ms.textContent = 'Watching for motion. Currently seeing ' + s.change +
-                       '% change, ' + s.preSecs + 's of history buffered.';
-    }
+  // Change against the threshold, so the number means something without
+  // remembering what was set on another page.
+  pct.textContent = s.motion ? ' ' + s.change + '/' + s.threshold + '%' : ' Record';
+
+  if (s.active) {
+    stats.textContent = s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps' +
+                        (s.triggered ? '  motion triggered' : '  started by hand');
+  } else if (!s.motion) {
+    stats.textContent = 'Motion recording off';
+  } else if (!s.armed) {
+    stats.textContent = 'Outside schedule  ' + s.preSecs + 's history';
+  } else {
+    stats.textContent = 'Watching  ' + s.preSecs + 's history';
   }
 }
 
@@ -448,9 +458,9 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   body += "<a class=btn href=\"/capture\" target=_blank>" + icon("image") +
           "Still image</a>";
   body += String("<button id=rec class=\"") + (recordingActive() ? "on" : "") + "\">" +
-          icon("dot") + (recordingActive() ? "Recording..." : "Record") +
-          "</button></div>";
-  body += "<p id=motionstate class=sub style=\"margin:0 0 10px\"></p>";
+          "<span id=recdot class=dot-off>" + icon("dot") + "</span>"
+          "<span id=recpct></span></button></div>";
+  body += "<p id=recstats></p>";
   body += INDEX_BODY;
   return sendShell(req, "/", body);
 }
@@ -470,13 +480,14 @@ static esp_err_t recordStateHandler(httpd_req_t *req) {
            "{\"active\":%s,\"frames\":%lu,\"fps\":%.1f,"
            "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu,"
            "\"triggered\":%s,\"motion\":%s,\"armed\":%s,\"change\":%u,"
-           "\"preFrames\":%lu,\"preSecs\":%lu}",
+           "\"threshold\":%u,\"preFrames\":%lu,\"preSecs\":%lu}",
            recordingActive() ? "true" : "false",
            (unsigned long)recordingFrames(), recordingFps(),
            (unsigned long)grab, (unsigned long)write, (unsigned long)index,
            recordingWasTriggered() ? "true" : "false",
            c.motionEnabled ? "true" : "false",
            motionArmed() ? "true" : "false", motionLastChange(),
+           c.motionSensitivity,
            (unsigned long)prerollFrames(), (unsigned long)prerollSeconds());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
@@ -1018,41 +1029,16 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   }
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
-  // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
-  // are two slots and the useful fact is which one is executing.
-  String slot = "unknown";
-  if (running) {
-    const String label = running->label;
-    if (label.startsWith("app") && label.length() == 4) {
-      slot = label.substring(3) + "/1";
-    } else {
-      slot = label;
-    }
-  }
-  row("Running slot", slot);
-  row("Setup access point", apWindowOpen()
+
+
+  Config stored;
+  if (configLoad(stored)) {
+    row("Setup access point", apWindowOpen()
                                 ? "open, " + String(apWindowSecondsLeft() / 60) +
                                       " min left"
                                 : "closed");
   row("Reset presses", String(bootPress) + " of " + String(bootPressNeeded) + " at last boot");
-  row("Firmware", String(FIRMWARE_VERSION));
-  row("Built", String(__DATE__) + " " + __TIME__);
-
-  esp_ota_img_states_t otaState = ESP_OTA_IMG_VALID;
-  if (running) esp_ota_get_state_partition(running, &otaState);
-  row("Update status", otaState == ESP_OTA_IMG_PENDING_VERIFY
-                           ? "on trial, reverts if it reboots unconfirmed"
-                           : "confirmed");
-
-  TrialState trial;
-  trialLoad(trial);
-  if (!trial.rolledBackFrom.isEmpty()) {
-    row("Last rollback", "reverted from " + trial.rolledBackFrom);
-  }
-
-  Config stored;
-  if (configLoad(stored)) {
-    row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
+  row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
   }
   body += "</table>";
 
@@ -1669,7 +1655,7 @@ static esp_err_t settingsPostHandler(httpd_req_t *req) {
 }
 
 static const char UPDATE_BODY[] = R"HTML(
-<h1>Firmware</h1>
+<h2 style="margin-top:24px">Update</h2>
 <p class=sub>Upload a firmware.bin. The camera reboots into it and signs you out.
 If it fails, the running firmware is untouched.</p>
 <div class=actions><input type=file id=f accept=".bin" style="max-width:280px">
@@ -1704,7 +1690,43 @@ document.getElementById('go').onclick = () => {
 
 static esp_err_t updatePageHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
-  return sendShell(req, "/update", UPDATE_BODY);
+
+  const esp_partition_t *running = esp_ota_get_running_partition();
+
+  String body = "<h1>Firmware</h1><table>";
+  auto row = [&body](const char *k, const String &v) {
+    body += "<tr><th>" + String(k) + "</th><td>" + htmlEscape(v) + "</td></tr>";
+  };
+
+  row("Version", String(FIRMWARE_VERSION));
+  row("Built", String(__DATE__) + " " + __TIME__);
+  // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
+  // are two slots and the useful fact is which one is executing.
+  String slot = "unknown";
+  if (running) {
+    const String label = running->label;
+    if (label.startsWith("app") && label.length() == 4) {
+      slot = label.substring(3) + "/1";
+    } else {
+      slot = label;
+    }
+  }
+  row("Running slot", slot);
+
+  esp_ota_img_states_t otaState = ESP_OTA_IMG_VALID;
+  if (running) esp_ota_get_state_partition(running, &otaState);
+  row("Update status", otaState == ESP_OTA_IMG_PENDING_VERIFY
+                           ? "on trial, reverts if it reboots unconfirmed"
+                           : "confirmed");
+
+  TrialState trial;
+  trialLoad(trial);
+  if (!trial.rolledBackFrom.isEmpty()) {
+    row("Last rollback", "reverted from " + trial.rolledBackFrom);
+  }
+  body += "</table>";
+  body += UPDATE_BODY;
+  return sendShell(req, "/update", body);
 }
 
 static esp_err_t updatePostHandler(httpd_req_t *req) {

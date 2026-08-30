@@ -692,13 +692,30 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   return sendShell(req, "/", body);
 }
 
+// Whether this camera can record at all, in the one word an aggregator needs.
+//
+// Reported rather than inferred. A camera with no card and a camera whose card
+// went read-only both fail to record, and both look identical from outside to
+// anything watching for recordings that never appear. Saying so plainly is what
+// lets the service record on the camera's behalf instead of waiting.
+//
+// Mounted is asked first because sdMounted() re-checks the card, while
+// sdWritable() reports a write test run at boot: a card pulled since then is
+// missing, not unwritable.
+static const char *storageState() {
+  if (!sdMounted()) return "missing";
+  return sdWritable() ? "ok" : "unwritable";
+}
+
 // Toggles rather than taking a state, so the button cannot disagree with the
 // device when two browsers are open on the same camera.
 // Lets the button reflect what the device is doing rather than what it was told
 // to do. Without it the label reads "Recording..." indefinitely.
 static esp_err_t recordStateHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
-  char out[320];
+  // Sized for every field at its longest. snprintf truncates in silence, and a
+  // JSON response cut off mid-number is a parse error with no cause attached.
+  char out[384];
   uint32_t grab = 0, write = 0, index = 0;
   recordingTiming(&grab, &write, &index);
   Config c;
@@ -708,7 +725,7 @@ static esp_err_t recordStateHandler(httpd_req_t *req) {
            "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu,"
            "\"triggered\":%s,\"motion\":%s,\"armed\":%s,\"change\":%u,"
            "\"threshold\":%u,\"preFrames\":%lu,\"preSecs\":%lu,"
-           "\"lux\":%u,\"rung\":%u,\"ael\":%d,\"gc\":%u}",
+           "\"lux\":%u,\"rung\":%u,\"ael\":%d,\"gc\":%u,\"storage\":\"%s\"}",
            recordingActive() ? "true" : "false",
            (unsigned long)recordingFrames(), recordingFps(),
            (unsigned long)grab, (unsigned long)write, (unsigned long)index,
@@ -719,7 +736,7 @@ static esp_err_t recordStateHandler(httpd_req_t *req) {
            (unsigned long)prerollFrames(), (unsigned long)prerollSeconds(),
            motionBrightness(), cameraAutoPosition(cameraCurrentImage()),
            (int)cameraCurrentImage().aeLevel,
-           (unsigned)cameraCurrentImage().gainCeiling);
+           (unsigned)cameraCurrentImage().gainCeiling, storageState());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
 }
@@ -1735,6 +1752,11 @@ static esp_err_t configJsonHandler(httpd_req_t *req) {
   boolean("vflip", c.vflip);
   num("flashlvl", c.flashLevel);
 
+  // Not a setting, but the one thing a caller reading this to decide what to do
+  // with the camera has to know, and it is here so it does not cost a second
+  // request to find out.
+  text("storage", storageState());
+
   // What the sensor is actually doing, which under auto is not what is stored.
   num("aelnow", cameraCurrentImage().aeLevel);
   num("gcnow", cameraCurrentImage().gainCeiling);
@@ -1847,6 +1869,29 @@ static int compareRows(const void *a, const void *b) {
   return sortDesc ? -c : c;
 }
 
+// A day directory is ten characters of YYYY-MM-DD. Checked character by
+// character rather than by length alone, because /rec holds whatever else has
+// been copied onto the card as well as the directories this firmware made.
+static bool isDayName(const char *name) {
+  if (strlen(name) != 10) return false;
+  for (int i = 0; i < 10; i++) {
+    if (i == 4 || i == 7) {
+      if (name[i] != '-') return false;
+    } else if (!isdigit((unsigned char)name[i])) return false;
+  }
+  return true;
+}
+
+// Recordings are named for the time they started, so an all-digit name is what
+// separates one from the day directories it sits beside in /rec.
+static bool isAllDigits(const char *name) {
+  if (!*name) return false;
+  for (const char *c = name; *c; c++) {
+    if (!isdigit((unsigned char)*c)) return false;
+  }
+  return true;
+}
+
 // Fills in the length and size of every recording in a directory.
 //
 // The day summary answers all of them in one read. Anything missing from it is
@@ -1856,16 +1901,10 @@ static int compareRows(const void *a, const void *b) {
 // finds is appended, including a zero for a recording that never got a frame, so
 // no recording is ever read the slow way twice.
 static void loadRecMeta(const String &dirPath, FileRow *rows, int count) {
-  // Recordings are named for the time they started, so an all-digit name is what
-  // separates them from the day directories they sit beside in /rec. Anything
-  // else is marked known straight away: there is nothing to look up for it, and
-  // nothing to retry on the next listing.
+  // Anything that is not a recording is marked known straight away: there is
+  // nothing to look up for it, and nothing to retry on the next listing.
   auto isRecording = [&](const FileRow &row) {
-    if (!row.entry.isDir || row.entry.name[0] == '\0') return false;
-    for (const char *c = row.entry.name; *c; c++) {
-      if (!isdigit((unsigned char)*c)) return false;
-    }
-    return true;
+    return row.entry.isDir && isAllDigits(row.entry.name);
   };
   for (int i = 0; i < count; i++) {
     rows[i].durMs = 0;
@@ -1922,6 +1961,194 @@ static void loadRecMeta(const String &dirPath, FileRow *rows, int count) {
     Serial.printf("files: recovered %d recording(s) from their index in %s\n",
                   recovered, dirPath.c_str());
   }
+}
+
+// The recordings on this card, as JSON, for the aggregator that pulls them off
+// it. The file listing already knows all of this and renders it for a person to
+// look at; these are the same answers without a page around them, so nothing has
+// to scrape HTML to find out what a camera is holding.
+
+// Over a year of days. /rec grows by one directory a day and ageing out removes
+// them from the far end, so this is a backstop rather than a limit anyone meets.
+static constexpr int DAYS_MAX = 400;
+
+static int compareNames(const void *a, const void *b) {
+  return strcmp(((const SdName *)a)->name, ((const SdName *)b)->name);
+}
+
+// The days that exist, so the service does not have to guess dates.
+//
+// A recording made before the clock reached an NTP server is numbered rather
+// than dated, and sits in /rec beside the day directories. Those are reported
+// under their own key: calling one a day would invent a date for footage whose
+// date is exactly what is not known, and leaving it out would hide footage that
+// is on the card. The name is what /video wants back either way.
+static esp_err_t recordingsDaysHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+  httpd_resp_set_type(req, "application/json");
+
+  // No card is an empty card, not an error. A caller learns why from `storage`
+  // on /config, which says so in a word.
+  if (!sdMounted()) {
+    return httpd_resp_send(req, "{\"days\":[],\"loose\":[],\"more\":false}",
+                           HTTPD_RESP_USE_STRLEN);
+  }
+
+  SdName *names = (SdName *)ps_malloc(sizeof(SdName) * DAYS_MAX);
+  if (!names) return httpd_resp_send_500(req);
+
+  int total = 0, tooLong = 0;
+  const int held = sdScan("/rec", names, DAYS_MAX, &total, &tooLong);
+  qsort(names, held, sizeof(SdName), compareNames);
+
+  // Both lists hold names this firmware wrote, filtered to digits and dashes on
+  // the way out, so there is nothing here that could need escaping.
+  String json = "{\"days\":[";
+  bool first = true;
+  for (int i = 0; i < held; i++) {
+    if (!names[i].isDir || !isDayName(names[i].name)) continue;
+    json += first ? "\"" : ",\"";
+    json += names[i].name;
+    json += "\"";
+    first = false;
+  }
+  json += "],\"loose\":[";
+  first = true;
+  for (int i = 0; i < held; i++) {
+    if (!names[i].isDir || !isAllDigits(names[i].name)) continue;
+    json += first ? "\"" : ",\"";
+    json += names[i].name;
+    json += "\"";
+    first = false;
+  }
+  // Truncation says so. A caller that silently never hears about the oldest day
+  // on the card would have no way to tell that from the day not existing.
+  json += "],\"more\":";
+  json += (total > held) ? "true" : "false";
+  json += "}";
+
+  free(names);
+  return httpd_resp_send(req, json.c_str(), json.length());
+}
+
+// A busy day here ran to 183 recordings. This is a ceiling on one response, not
+// on the card, and it is set well above what a day of motion triggering has
+// actually produced.
+static constexpr int DAY_RECORDINGS_MAX = 500;
+
+struct DayRow {
+  uint32_t at;
+  uint32_t durMs;
+  uint32_t bytes;
+  uint32_t frames;
+};
+
+static int compareDayRows(const void *a, const void *b) {
+  const uint32_t x = ((const DayRow *)a)->at;
+  const uint32_t y = ((const DayRow *)b)->at;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+// One day's recordings, read from that day's summary and nothing else.
+//
+// The summary holds a line per recording, so a whole day costs one file open.
+// Asking each recording directory instead costs about 150ms an open on this
+// card, which is 27 seconds for the day of 183 recordings sitting on it now.
+// That is the measurement the summary was written against, and it is not a
+// price to pay again for a caller that cannot see it being paid.
+//
+// So this reads only the summary, and reads it whole: the file is appended to,
+// not sorted, and a recording recovered from its own index lands at the end
+// however early it started. Sorting here is what makes a capped response the
+// first N recordings of the day rather than an arbitrary N of them.
+//
+// Nothing is written back either. The HTML listing repairs a missing line from
+// the recording's own index, which it can afford because it has already read the
+// directory; this has not, and a GET that rewrites the card to answer a question
+// is a surprise. The cost is that a recording the power cut off before it wrote
+// its line is missing here until someone opens the day in the browser once.
+//
+// The summary can also run the other way and name a recording that has been
+// deleted, because ageing out removes the directory and leaves the line. The
+// listing never notices, since it matches lines against directories it has
+// already read. A caller here does, as a 404 from /video, and that is the
+// honest answer: the alternative is a file open per line to check, which is the
+// 150ms charge this endpoint exists to avoid.
+static esp_err_t recordingsJsonHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+  httpd_resp_set_type(req, "application/json");
+
+  const String day = queryParam(req, "day", "");
+  // Checked to the letter rather than handed to sdPathIsSafe: ten characters of
+  // YYYY-MM-DD cannot walk anywhere, whatever was in the query string.
+  if (!isDayName(day.c_str())) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    return httpd_resp_send(req, "{\"error\":\"day must be YYYY-MM-DD\"}",
+                           HTTPD_RESP_USE_STRLEN);
+  }
+
+  const String dir = String("/rec/") + day;
+  void *fh = nullptr;
+  if (!sdIndexOpen(dir + "/.day", &fh)) {
+    // A day with no summary and a day that is not there answer differently, and
+    // only the second is a mistake worth reporting. The extra open is on the
+    // path that already found nothing, not on the one that does the work.
+    if (!sdExists(dir)) {
+      httpd_resp_set_status(req, "404 Not Found");
+      return httpd_resp_send(req, "{\"error\":\"no such day\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    const String empty =
+        String("{\"day\":\"") + day + "\",\"recordings\":[],\"more\":false}";
+    return httpd_resp_send(req, empty.c_str(), empty.length());
+  }
+
+  DayRow *rows = (DayRow *)ps_malloc(sizeof(DayRow) * DAY_RECORDINGS_MAX);
+  if (!rows) {
+    sdIndexClose(fh);
+    return httpd_resp_send_500(req);
+  }
+
+  int held = 0, total = 0;
+  uint32_t at = 0, durMs = 0, bytes = 0, frames = 0;
+  while (sdIndexNext(fh, &at, &durMs, &bytes, &frames)) {
+    total++;
+    if (held >= DAY_RECORDINGS_MAX) continue;
+    rows[held].at = at;
+    rows[held].durMs = durMs;
+    rows[held].bytes = bytes;
+    rows[held].frames = frames;
+    held++;
+  }
+  sdIndexClose(fh);
+
+  qsort(rows, held, sizeof(DayRow), compareDayRows);
+
+  String json = String("{\"day\":\"") + day + "\",\"recordings\":[";
+  json.reserve(64 * (held + 2));
+  char piece[96];
+  for (int i = 0; i < held; i++) {
+    // The start time goes back out as the six digits it is on the card, because
+    // that is what /video wants for a directory name: 041541 is a recording and
+    // 41541 is nothing. It is a string for the same reason.
+    //
+    // frames is zero for anything recorded before the summary carried a frame
+    // count, which is every recording already on a card today. A caller telling
+    // "not counted" from "counted none" has bytes to go on: no frames means no
+    // bytes.
+    const int n = snprintf(piece, sizeof(piece),
+                           "%s{\"at\":\"%06lu\",\"durMs\":%lu,\"bytes\":%lu,"
+                           "\"frames\":%lu}",
+                           i ? "," : "", (unsigned long)rows[i].at,
+                           (unsigned long)rows[i].durMs, (unsigned long)rows[i].bytes,
+                           (unsigned long)rows[i].frames);
+    json.concat(piece, n);
+  }
+  free(rows);
+
+  json += "],\"more\":";
+  json += (total > held) ? "true" : "false";
+  json += "}";
+  return httpd_resp_send(req, json.c_str(), json.length());
 }
 
 static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
@@ -2670,6 +2897,8 @@ bool startWebServers(bool cameraOk) {
       {"/networks", HTTP_GET, networksHandler},
       {"/recording", HTTP_GET, recordingsPageHandler},
       {"/recording", HTTP_POST, recordingsPostHandler},
+      {"/recordings", HTTP_GET, recordingsJsonHandler},
+      {"/recordings/days", HTTP_GET, recordingsDaysHandler},
       {"/record", HTTP_GET, recordStateHandler},
       {"/record", HTTP_POST, recordHandler},
       {"/image", HTTP_POST, imageHandler},

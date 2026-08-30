@@ -97,9 +97,15 @@ bool sdAppendSmall(const String &path, const String &contents);
 String sdReadTail(const String &path, size_t maxLen);
 size_t sdReadNext(void *handle, uint8_t *out, size_t len);
 
-// Reads one line of an index file. Returns false at end of file.
+// Reads one line of an index or day summary file: three numbers, and a fourth
+// if the line carries one. Returns false at end of file.
+//
+// `fourth` is for the day summary, whose lines grew a frame count after the
+// first three fields were already on cards. A line without it reads as zero, so
+// one reader serves both shapes and neither file needs rewriting.
 bool sdIndexOpen(const String &path, void **handle);
-bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs);
+bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs,
+                 uint32_t *fourth = nullptr);
 void sdIndexClose(void *handle);
 
 // Removes a file, or a directory and everything under it. Recursion is depth

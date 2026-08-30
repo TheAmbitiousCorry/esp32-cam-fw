@@ -387,7 +387,8 @@ void sdCloseRead(void *handle) {
 
 bool sdIndexOpen(const String &path, void **handle) { return sdOpenRead(path, handle); }
 
-bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs) {
+bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs,
+                 uint32_t *fourth) {
   File *f = (File *)handle;
   if (!f || !*f) return false;
   // A line that does not parse is skipped rather than taken for the end of the
@@ -395,8 +396,11 @@ bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atM
   // hide every line written after it.
   while (f->available()) {
     const String line = f->readStringUntil('\n');
-    if (sscanf(line.c_str(), "%lu %lu %lu", (unsigned long *)offset,
-               (unsigned long *)length, (unsigned long *)atMs) == 3) {
+    unsigned long extra = 0;
+    const int got = sscanf(line.c_str(), "%lu %lu %lu %lu", (unsigned long *)offset,
+                           (unsigned long *)length, (unsigned long *)atMs, &extra);
+    if (got >= 3) {
+      if (fourth) *fourth = got >= 4 ? (uint32_t)extra : 0;
       return true;
     }
   }
@@ -445,8 +449,18 @@ int sdAgeOut(uint32_t keepFreeMb) {
 
     String recPath, recName;
     if (!firstEntry(dayPath, &recPath, &recName)) {
-      // An empty day directory left behind by earlier deletions.
-      SD_MMC.rmdir(dayPath);
+      // A day whose recordings have all been aged out. It is not empty: its
+      // summary file is still in there, and that file is hidden, so the listing
+      // which just reported the day empty cannot see it and rmdir refuses to
+      // remove a directory that is not. removeAt walks the filesystem directly
+      // rather than through the listing, so it takes the summary with it.
+      //
+      // Without this the loop retried the same day on every one of its twenty
+      // attempts, freed nothing, and did the same on every recording after.
+      // Ageing stopped working permanently, which on a camera means the card
+      // fills and recording stops. The return value is checked for the same
+      // reason: a delete that cannot succeed must end the pass, not spin.
+      if (!removeAt(dayPath, 0)) break;
       continue;
     }
 

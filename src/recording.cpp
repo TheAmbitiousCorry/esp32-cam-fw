@@ -268,11 +268,17 @@ void recordingStop() {
   // single read instead of a file open for every recording in it, and this card
   // charges about 150ms an open: fifty recordings is the difference between
   // twelve seconds and under one. Hidden, because it is bookkeeping, not footage.
+  //
+  // The frame count is the fourth number and was added after the first three.
+  // Readers take three numbers and treat a missing fourth as zero, so a card
+  // written by older firmware still lists, and a recording recovered from its
+  // own index still writes three: that path reads the tail of the index and
+  // never learns how many frames came before it.
   const int cut = dir.lastIndexOf('/');
   if (cut > 0) {
     char line[80];
-    snprintf(line, sizeof(line), "%s %lu %lu\n", dir.c_str() + cut + 1,
-             (unsigned long)durMs, (unsigned long)bytes);
+    snprintf(line, sizeof(line), "%s %lu %lu %lu\n", dir.c_str() + cut + 1,
+             (unsigned long)durMs, (unsigned long)bytes, (unsigned long)frames);
     sdAppendSmall(dir.substring(0, cut) + "/.day", line);
   }
   Serial.printf("recording done: %lu frames, %lu KB, %.1f fps over %.1fs\n",

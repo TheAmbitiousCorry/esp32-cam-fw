@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <atomic>
 #include <Update.h>
 #include <WiFi.h>
 #include "esp_http_server.h"
@@ -390,7 +391,7 @@ if (rb) {
 // shows it. Debounced because dragging a slider fires continuously and the
 // camera has better things to do.
 const imgFields = ['ael','gc','flashlvl','bri','con','sat','wb'];
-const imgChecks = ['autoimg','flashmot','gray','hmir','vflip'];
+const imgChecks = ['autoimg','gray','hmir','vflip'];
 let imgTimer = null;
 
 // Exposure and gain belong to the loop while auto is on. Leaving them live would
@@ -639,11 +640,6 @@ static esp_err_t indexHandler(httpd_req_t *req) {
     body += "</select><small class=sub>Lower means darker but cleaner. Noise in the "
             "dark is what makes motion detection fire at nothing.</small>";
     range("flashlvl", "Flash brightness", 0, 255, c.flashLevel);
-    check("flashmot", "Flash one still on motion", c.flashOnMotion);
-    body += "<small class=sub>Fires the flash once when a recording starts and "
-            "saves the lit frame beside the video. The LED is built for a burst, "
-            "not for lighting a scene, so this is the only thing that uses it "
-            "unattended.</small>";
     range("bri", "Brightness", -2, 2, c.brightness);
     range("con", "Contrast", -2, 2, c.contrast);
     range("sat", "Saturation", -2, 2, c.saturation);
@@ -745,7 +741,6 @@ static esp_err_t imageHandler(httpd_req_t *req) {
   c.saturation = (int8_t)clampi(formField(body, "sat"), -2, 2, c.saturation);
   c.wbMode = (uint8_t)clampi(formField(body, "wb"), 0, 4, c.wbMode);
   c.flashLevel = (uint8_t)clampi(formField(body, "flashlvl"), 0, 255, c.flashLevel);
-  c.flashOnMotion = formField(body, "flashmot") == "1";
   c.grayscale = formField(body, "gray") == "1";
   c.hmirror = formField(body, "hmir") == "1";
   c.vflip = formField(body, "vflip") == "1";
@@ -954,14 +949,6 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
           "<a class=btn href=\"/files?path=" + htmlEscape(parentOf(dir)) +
           "\">" + icon("up") + "Back</a></div>";
 
-  // A recording made with the motion flash on has one frame lit properly. It is
-  // the clearest look at whatever triggered the event, so it goes above the
-  // replay rather than being left as a file to find.
-  if (sdExists(dir + "/snap.jpg")) {
-    body += "<p class=sub>" + icon("bolt") +
-            "Flash-lit still, taken as the recording started.</p>"
-            "<img src=\"/download?view=1&path=" + htmlEscape(dir) + "/snap.jpg\" alt=\"\">";
-  }
   body += "<script>const DIR='" + dir + "';</script>";
   body += R"HTML(<script>
 const img = document.getElementById('p');
@@ -1622,13 +1609,9 @@ static esp_err_t downloadHandler(httpd_req_t *req) {
   if (name == "video.mjpeg" && cut > 0) {
     name = recordingFileName(path.substring(0, cut)) + ".mjpeg";
   }
-  // Same bytes either way; the difference is whether the browser saves them or
-  // draws them. The playback page needs a picture, the file listing needs a
-  // download, and asking for one should never give the other.
-  const bool view = queryParam(req, "view", "") == "1";
-  const String disp = (view ? "inline; filename=\"" : "attachment; filename=\"") + name + "\"";
+  const String disp = "attachment; filename=\"" + name + "\"";
 
-  httpd_resp_set_type(req, view ? "image/jpeg" : "application/octet-stream");
+  httpd_resp_set_type(req, "application/octet-stream");
   httpd_resp_set_hdr(req, "Content-Disposition", disp.c_str());
 
   esp_err_t res = ESP_OK;
@@ -2469,7 +2452,12 @@ struct StreamJob {
 };
 
 static QueueHandle_t streamJobs = nullptr;
-static volatile int streamViewers = 0;
+
+// Atomic, not volatile: the count goes up on the server task and down on three
+// worker tasks, and a plain increment is a read, an add and a write. Losing one
+// decrement would leak a viewer slot for the life of the boot, which is the same
+// shape of failure this whole change exists to remove.
+static std::atomic<int> streamViewers{0};
 
 static void streamWorker(void *) {
   for (;;) {

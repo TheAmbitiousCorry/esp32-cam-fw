@@ -1,3 +1,4 @@
+#include <atomic>
 #include <MD5Builder.h>
 #include "esp_camera.h"
 #include <Preferences.h>
@@ -70,7 +71,7 @@ bool passwordMatches(const Config &cfg, const String &password) {
   return diff == 0;
 }
 
-static volatile uint32_t revision = 0;
+static std::atomic<uint32_t> revision{0};
 uint32_t configRevision() { return revision; }
 
 bool configLoad(Config &out) {
@@ -104,7 +105,6 @@ bool configLoad(Config &out) {
   out.hmirror = prefs.getBool("hmir", false);
   out.vflip = prefs.getBool("vflip", false);
   out.flashLevel = prefs.getUChar("flash", 60);
-  out.flashOnMotion = prefs.getBool("flashmot", false);
   out.keepFreeMb = prefs.getUShort("keepfree", 512);
   out.scheduleEnabled = prefs.getBool("schen", false);
   out.scheduleFromHour = prefs.getUChar("schfrom", 22);
@@ -152,7 +152,6 @@ bool configSave(const Config &cfg) {
   prefs.putBool("hmir", cfg.hmirror);
   prefs.putBool("vflip", cfg.vflip);
   prefs.putUChar("flash", cfg.flashLevel);
-  prefs.putBool("flashmot", cfg.flashOnMotion);
   prefs.putUShort("keepfree", cfg.keepFreeMb);
   prefs.putBool("schen", cfg.scheduleEnabled);
   prefs.putUChar("schfrom", cfg.scheduleFromHour);

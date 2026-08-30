@@ -442,23 +442,7 @@ static void motionTick() {
     if (aged) Serial.printf("aged out %d old recordings to make room\n", aged);
 
     recordingSetActivityCheck(stillMoving, cfg.quietSeconds);
-    if (recordingStart(cfg.recordSeconds)) {
-      recordingMarkTriggered();
-      // One burst, once, at the start of the event. The LED cannot light a scene
-      // for fifteen seconds without cooking, but it can light one frame, and one
-      // clear picture of what triggered the recording is usually what the
-      // footage was wanted for. Saved beside the video rather than in it, so the
-      // recording stays the rate it was and the still stays the quality it was.
-      if (cfg.flashOnMotion) {
-        camera_fb_t *lit = cameraGrabWithFlash();
-        if (lit) {
-          if (isCompleteJpeg(lit)) {
-            sdWriteFile(recordingDir() + "/snap.jpg", lit->buf, lit->len);
-          }
-          esp_camera_fb_return(lit);
-        }
-      }
-    }
+    if (recordingStart(cfg.recordSeconds)) recordingMarkTriggered();
   }
 }
 

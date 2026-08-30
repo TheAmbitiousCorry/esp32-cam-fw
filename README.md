@@ -1,19 +1,44 @@
-# ESP32-CAM firmware
+<img src="docs/media/argus-eye.svg" alt="" width="52" align="right">
 
-Firmware for an AI-Thinker ESP32-CAM that streams video, records to an SD card,
-and is configured entirely from a web interface. No serial console or toolchain
-is needed after the first flash.
+# Argus Cam
 
-Written from scratch as a learning project, and measured on real hardware rather
-than assumed: `docs/principles.md` records what the board taught us, with the
-number behind each rule.
+**Argus NVR compatible ESP32-CAM firmware.** Flash it once over USB and never
+open a serial console again: everything after that happens in a browser, or over
+the air.
 
-It signs you in over plain HTTP, with the password stored as a salted PBKDF2
-hash and compared in constant time, but there is no TLS. That is fine on a
-trusted network and nowhere else. Do not put it on the internet.
+![Live view, the file browser, motion settings, and status](docs/media/argus-cam.gif)
 
-To watch several of these on one screen, `esp32-cam-nvr` holds the credentials
-and fans out the streams: https://github.com/TheAmbitiousCorry/esp32-cam-nvr
+## What you get
+
+- **24 frames a second at 800x600**, straight from the sensor to your browser,
+  and to the SD card at the same time.
+- **Motion recording** with a threshold you can see against the live reading, a
+  schedule, and seconds of footage kept from *before* the trigger.
+- **Recordings that play.** Download one and it opens in any player: the camera
+  wraps its frames in a container on the way out, without re-encoding anything.
+- **Exposure that follows the light.** One ladder from bright to dark, moving
+  only when the scene has genuinely changed, so a passing shadow does not swing
+  the picture.
+- **Updates that cannot brick it.** An image that fails to reach the network is
+  discarded and the previous firmware runs again. The status page names the
+  version it reverted from.
+- **Recovery you can reach.** Three deliberate presses of the reset button
+  restore the setup network, whatever state the settings are in.
+
+Written from scratch, not forked: 6,900 lines, 70% of the flash, no serial
+console needed after the first flash. `docs/principles.md` records what this
+board taught us with the measurement behind each rule, which is worth reading
+before adding anything that touches the camera, the card, or the radio.
+
+## Honestly
+
+It signs you in over plain HTTP. The password is stored as a salted PBKDF2 hash
+and compared in constant time, but there is no TLS, so this belongs on a network
+you trust. Do not put it on the internet.
+
+To watch several of these on one screen, with one login and one connection per
+camera, [Argus NVR](https://github.com/TheAmbitiousCorry/argus-nvr) is the
+sibling repository.
 
 ## First run
 

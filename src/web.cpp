@@ -114,7 +114,8 @@ static const char SHARED_CSS[] =
     "img{max-width:100%;border-radius:6px;background:#000;display:block}"
     ".zoomwrap{position:relative;overflow:hidden;max-width:100%;border-radius:6px;"
     "background:#000;touch-action:none}"
-    ".zoomwrap img{display:block;transform-origin:0 0;cursor:grab}"
+    ".zoomwrap img{display:block;transform-origin:0 0;cursor:grab;"
+    "user-select:none;-webkit-user-drag:none}"
     ".zoomwrap img.dragging{cursor:grabbing}"
 
     ".actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}"
@@ -351,7 +352,11 @@ function attachZoom(wrapId, imgId, labelId) {
   const apply = () => {
     clamp();
     img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
-    if (label) label.textContent = scale.toFixed(1) + 'x';
+    img.style.cursor = scale > 1 ? 'grab' : 'default';
+    if (label) {
+      label.textContent = scale.toFixed(1) + 'x' +
+                          (scale > 1 ? '  drag to pan, double-click to fit' : '');
+    }
   };
 
   const zoomAt = (factor, cx, cy) => {
@@ -373,7 +378,13 @@ function attachZoom(wrapId, imgId, labelId) {
     zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, focusX, focusY);
   }, {passive: false});
 
+  // Without this the browser begins its own image drag and the pointermove
+  // events never arrive, so panning silently does nothing.
+  img.draggable = false;
+  wrap.addEventListener('dragstart', e => e.preventDefault());
+
   wrap.addEventListener('pointerdown', e => {
+    e.preventDefault();
     dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
     wrap.setPointerCapture(e.pointerId);
   });
@@ -406,7 +417,11 @@ function attachZoom(wrapId, imgId, labelId) {
   };
   wrap.addEventListener('pointerup', end);
   wrap.addEventListener('pointercancel', () => { dragging = false; });
-  wrap.addEventListener('dblclick', e => { e.preventDefault(); });
+  wrap.addEventListener('dblclick', e => {
+    e.preventDefault();
+    scale = 1; tx = 0; ty = 0; focusX = focusY = null;
+    apply();
+  });
 
   window.zoomIn = () => zoomAt(1.4, fx(), fy());
   window.zoomOut = () => zoomAt(1 / 1.4, fx(), fy());
@@ -797,7 +812,11 @@ function attachZoom(wrapId, imgId, labelId) {
   const apply = () => {
     clamp();
     img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
-    if (label) label.textContent = scale.toFixed(1) + 'x';
+    img.style.cursor = scale > 1 ? 'grab' : 'default';
+    if (label) {
+      label.textContent = scale.toFixed(1) + 'x' +
+                          (scale > 1 ? '  drag to pan, double-click to fit' : '');
+    }
   };
 
   const zoomAt = (factor, cx, cy) => {
@@ -819,7 +838,13 @@ function attachZoom(wrapId, imgId, labelId) {
     zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, focusX, focusY);
   }, {passive: false});
 
+  // Without this the browser begins its own image drag and the pointermove
+  // events never arrive, so panning silently does nothing.
+  img.draggable = false;
+  wrap.addEventListener('dragstart', e => e.preventDefault());
+
   wrap.addEventListener('pointerdown', e => {
+    e.preventDefault();
     dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
     wrap.setPointerCapture(e.pointerId);
   });
@@ -852,7 +877,11 @@ function attachZoom(wrapId, imgId, labelId) {
   };
   wrap.addEventListener('pointerup', end);
   wrap.addEventListener('pointercancel', () => { dragging = false; });
-  wrap.addEventListener('dblclick', e => { e.preventDefault(); });
+  wrap.addEventListener('dblclick', e => {
+    e.preventDefault();
+    scale = 1; tx = 0; ty = 0; focusX = focusY = null;
+    apply();
+  });
 
   window.zoomIn = () => zoomAt(1.4, fx(), fy());
   window.zoomOut = () => zoomAt(1 / 1.4, fx(), fy());

@@ -9,10 +9,7 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-- **Footage survives on the SD card and can be played back**: stated goal, and the
-  half of "security camera" that outlives a power cut. Why now: motion detection is
-  worth nothing until there is somewhere for a trigger to write to, so storage
-  precedes it in dependency order. Domains: storage, camera. Appetite: large.
+_Empty. The next item comes from Next._
 
 ## Next
 
@@ -22,6 +19,28 @@ Domain tags are provisional: no spec directory exists yet.
   path has to expose. Domains: network, storage. Appetite: small.
 
 ## Later
+
+- **Footage leaves the camera on its own**: a recording that exists only on a
+  card in a camera is lost with the camera. What would promote it: the camera
+  being mounted somewhere a thief could reach it, or wanting footage without
+  fetching it. FTP or a plain HTTP POST to a server on the network; the card
+  stops being the only copy. Domains: network, storage. Appetite: small.
+
+- **Several cameras are watched from one screen**: one camera means opening one
+  page; four means remembering four addresses and four passwords. What would
+  promote it: owning a second camera. Likely shape is a machine on the network
+  that discovers cameras by mDNS, holds their credentials, and shows their
+  streams together, rather than anything running on the cameras themselves.
+  Domains: network. Appetite: large.
+
+- **Zoom shows more detail rather than bigger pixels**: the browser zoom crops
+  an image the device already downscaled, so it magnifies without revealing
+  anything. Cropping at the sensor before it downscales would give real detail
+  at the cost of field of view. What would promote it: wanting to read a face or
+  a plate from footage that currently cannot. Held here because it means
+  changing sensor windowing at runtime, which is the same class of change as the
+  frame size handling that wedged the camera for thirty seconds a frame.
+  Domains: camera. Appetite: small.
 
 - **Detection distinguishes a person from a moving branch**: naive motion
   detection produces false positives that train you to ignore it. What would

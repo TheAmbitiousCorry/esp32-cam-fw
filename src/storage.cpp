@@ -26,6 +26,18 @@ static void refreshSpace(bool force) {
   cachedTotal = SD_MMC.totalBytes();
   cachedUsed = SD_MMC.usedBytes();
   cachedAt = millis();
+
+  // A card pulled while the camera is running leaves a mount that answers
+  // nothing. Nothing told us, because mounting happened once at boot and was
+  // never questioned again, so the status page went on reporting a card and its
+  // free space while every recording failed with "no writable card". A total of
+  // zero is what a dead mount reports, and it is not a size a real card has.
+  if (cachedTotal == 0) {
+    Serial.println("SD: the card stopped answering, unmounting");
+    SD_MMC.end();
+    mounted = false;
+    writable = false;
+  }
 }
 
 static bool runWriteTest() {
@@ -77,7 +89,19 @@ bool sdInit() {
   return true;
 }
 
-bool sdMounted() { return mounted; }
+bool sdMounted() {
+  refreshSpace(false);  // so asking whether there is a card is asking, not remembering
+  return mounted;
+}
+
+bool sdRemount() {
+  if (mounted) {
+    SD_MMC.end();
+    mounted = false;
+  }
+  cachedAt = 0;
+  return sdInit();
+}
 bool sdWritable() { return writable; }
 
 String sdCardType() {

@@ -15,6 +15,11 @@
 bool sdInit();
 
 bool sdMounted();
+
+// Tears the mount down and builds it again. For a card that was swapped while
+// the camera was running: the old handle answers nothing and only a fresh mount
+// will see the new card.
+bool sdRemount();
 String sdCardType();
 uint64_t sdTotalBytes();
 uint64_t sdUsedBytes();

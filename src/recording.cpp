@@ -185,7 +185,16 @@ static void writePreroll() {
 }
 
 bool recordingStart(uint32_t seconds) {
-  if (active || !sdMounted() || !sdWritable()) return false;
+  if (active) return false;
+
+  // A card swapped while the camera was running leaves a mount that answers
+  // nothing, and the only way back is a fresh one. Tried here rather than on a
+  // timer because this is the moment it matters, and it costs nothing when the
+  // card was there all along.
+  if (!sdMounted() || !sdWritable()) {
+    if (!sdRemount()) return false;
+    Serial.println("recording: the card came back after a remount");
+  }
 
   if (!SD_MMC.exists(REC_ROOT) && !SD_MMC.mkdir(REC_ROOT)) {
     Serial.println("recording: could not create /rec");

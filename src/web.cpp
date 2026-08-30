@@ -238,34 +238,31 @@ static void registerUri(httpd_handle_t server, const httpd_uri_t *uri) {
 // camera is one of its eyes. Inline like every other icon here, so there is
 // nothing extra to serve and it takes the colour of whatever it sits in.
 static const char ARGUS_EYE[] =
-    "<svg viewBox='0 0 64 100' fill='none' stroke='currentColor' stroke-width='5' "
+    "<svg viewBox='0 0 84 132' fill='none' stroke='currentColor' stroke-width='4.6' "
     "stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>"
-    "<path d='M32 3v7M18 7l4 7M46 7l-4 7M7 15l5 6M57 15l-5 6M2 27h7M62 27h-7'/>"
-    "<path d='M6 30c8-11 16-16 26-16s18 5 26 16c-8 11-16 16-26 16S14 41 6 30z'/>"
-    "<circle cx='32' cy='30' r='9'/><circle cx='32' cy='30' r='3' fill='currentColor'/>"
-    "<path d='M32 46c0 7-7 10-7 17s9 9 9 16'/>"
-    "<path d='M34 79c6 0 10 4 10 9s-4 9-10 9-11-4-11-9 4-7 8-7 6 2 6 5-2 4-4 4'/>"
+    "<path d='M42.0 96.0Q42.0 82.0 42.0 68.0'/>"
+    "<path d='M7.0 33.0Q42.0 -5.0 77.0 33.0Q42.0 71.0 7.0 33.0Z'/>"
+    "<circle cx='42.0' cy='33.0' r='10.0'/>"
+    "<circle cx='42.0' cy='33.0' r='1.7' fill='currentColor'/>"
+    "<path d='M21.3 17.6L0.1 3.3'/>"
+    "<path d='M30.3 8.7L18.3 -13.9'/>"
+    "<path d='M42.0 5.4L42.0 -20.1'/>"
+    "<path d='M53.7 8.7L65.7 -13.9'/>"
+    "<path d='M62.7 17.6L83.9 3.3'/>"
+    "<path d='M42 97c-10 1-16 5-16 11s7 11 16 11 17-4 17-11-5-9-10-9-9 3-9 7 3 5 6 5 4-1 4-3'/>"
     "</svg>";
 
 // The favicon is the same drawing, handed over as a data URI so it costs one
 // attribute rather than a route and a request.
 static const char ARGUS_FAVICON[] =
-    "<link rel=icon href=\"data:image/svg+xml,"
-    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 100' fill='none' "
-    "stroke='%23e8e8e8' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E"
-    "%3Cpath d='M32 3v7M18 7l4 7M46 7l-4 7M7 15l5 6M57 15l-5 6M2 27h7M62 27h-7'/%3E"
-    "%3Cpath d='M6 30c8-11 16-16 26-16s18 5 26 16c-8 11-16 16-26 16S14 41 6 30z'/%3E"
-    "%3Ccircle cx='32' cy='30' r='9'/%3E%3Ccircle cx='32' cy='30' r='3' fill='%23e8e8e8'/%3E"
-    "%3Cpath d='M32 46c0 7-7 10-7 17s9 9 9 16'/%3E"
-    "%3Cpath d='M34 79c6 0 10 4 10 9s-4 9-10 9-11-4-11-9 4-7 8-7 6 2 6 5-2 4-4 4'/%3E"
-    "%3C/svg%3E\">";
+    "<link rel=icon href=\"data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2084%20132%27%20fill%3D%27none%27%20stroke%3D%27%23e8e8e8%27%20stroke-width%3D%274.6%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M42.0%2096.0Q42.0%2082.0%2042.0%2068.0%27%2F%3E%3Cpath%20d%3D%27M7.0%2033.0Q42.0%20-5.0%2077.0%2033.0Q42.0%2071.0%207.0%2033.0Z%27%2F%3E%3Ccircle%20cx%3D%2742.0%27%20cy%3D%2733.0%27%20r%3D%2710.0%27%2F%3E%3Ccircle%20cx%3D%2742.0%27%20cy%3D%2733.0%27%20r%3D%271.7%27%20fill%3D%27%23e8e8e8%27%2F%3E%3Cpath%20d%3D%27M21.3%2017.6L0.1%203.3%27%2F%3E%3Cpath%20d%3D%27M30.3%208.7L18.3%20-13.9%27%2F%3E%3Cpath%20d%3D%27M42.0%205.4L42.0%20-20.1%27%2F%3E%3Cpath%20d%3D%27M53.7%208.7L65.7%20-13.9%27%2F%3E%3Cpath%20d%3D%27M62.7%2017.6L83.9%203.3%27%2F%3E%3Cpath%20d%3D%27M42%2097c-10%201-16%205-16%2011s7%2011%2016%2011%2017-4%2017-11-5-9-10-9-9%203-9%207%203%205%206%205%204-1%204-3%27%2F%3E%3C%2Fsvg%3E\">";
 
 static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
   String page = "<!doctype html><meta charset=utf-8>"
                 "<meta name=viewport content='width=device-width,initial-scale=1'>";
   page += ARGUS_FAVICON;
   page += "<title>";
-  page += htmlEscape(cameraName);
+  page += htmlEscape(cameraName) + " Cam";
   page += "</title><style>";
   page += SHARED_CSS;
   page += "</style>";
@@ -285,7 +282,7 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
 
   String nav = "<div class=app><aside><div class=brand>";
   nav += String("<span class=logo>") + ARGUS_EYE + "</span>";
-  nav += htmlEscape(cameraName) + "</div>";
+  nav += htmlEscape(cameraName) + " Cam</div>";
   for (const Item &it : items) {
     nav += String("<a href=\"") + it.href + "\"";
     if (strcmp(it.href, active) == 0) nav += " class=on";
@@ -299,7 +296,7 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
 static esp_err_t sendLoginPage(httpd_req_t *req, const String &error) {
   String body = String("<div class=card><form method=post action=/login>"
                        "<div class=loginmark>") + ARGUS_EYE + "</div>"
-                "<h2>" + htmlEscape(cameraName) + "</h2>"
+                "<h2>" + htmlEscape(cameraName) + " Cam</h2>"
                 "<p class=sub>Sign in to view this camera.</p>"
                 "<label>Username</label><input name=user autofocus required>"
                 "<label>Password</label><input type=password name=pass required>";

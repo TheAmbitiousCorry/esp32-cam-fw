@@ -2,6 +2,7 @@
 #include <DNSServer.h>
 #include <WiFi.h>
 #include "esp_http_server.h"
+#include "esp_mac.h"
 
 #include "config.h"
 #include "httputil.h"
@@ -62,6 +63,24 @@ static esp_err_t sendPage(httpd_req_t *req, const String &body) {
   return httpd_resp_send(req, page.c_str(), page.length());
 }
 
+// A name a person will actually keep, offered as the default at setup. "camera1"
+// gets accepted and then nobody can tell which camera it is; a name has to be
+// distinct before it is memorable. Drawn from the myth the aggregator is named
+// for, and picked from the chip's own MAC so the same board always proposes the
+// same name however many times setup is run.
+static String suggestedName() {
+  static const char *NAMES[] = {
+      "argos",  "hermes", "iris",   "helios", "selene", "theia",  "eos",
+      "atlas",  "hyperion", "kronos", "rhea",  "phoebe", "tethys", "nyx",
+      "erebus", "aether", "chaos",  "gaia",   "pontus", "thalia", "clio",
+      "urania", "calliope", "euterpe", "terpsi", "erato", "polymnia", "melpomene",
+      "boreas", "notus",  "zephyr", "eurus",  "triton", "nereus", "proteus"};
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  const uint32_t seed = ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
+  return NAMES[seed % (sizeof(NAMES) / sizeof(NAMES[0]))];
+}
+
 static esp_err_t setupPageHandler(httpd_req_t *req) {
   // Scanning needs the station interface, which is why the portal runs AP_STA
   // rather than plain AP.
@@ -71,7 +90,8 @@ static esp_err_t setupPageHandler(httpd_req_t *req) {
                 "<h1>Camera setup</h1>"
                 "<p class=sub>Name the camera, choose a network, and set the "
                 "password you will use to sign in from now on.</p>"
-                "<label>Camera name</label><input name=camname value=\"front-door\" required>"
+                "<label>Camera name</label><input name=camname value=\"" +
+                htmlEscape(suggestedName()) + "\" required>"
                 "<small>Becomes the address you visit, so keep it simple. "
                 "Letters, numbers and hyphens.</small>"
                 "<label>Network</label><select name=ssid>";

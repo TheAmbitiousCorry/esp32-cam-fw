@@ -9,6 +9,7 @@
 #endif
 
 #include "auth.h"
+#include "avi.h"
 #include "camera.h"
 #include "clock.h"
 #include "config.h"
@@ -940,6 +941,9 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
   body += "<div class=actions>"
           "<button id=pp class=primary>" + icon("play") + "Play</button>"
           "<span id=pos class=sub style=\"align-self:center\"></span>"
+          "<a class=btn data-tip=\"Download this recording as an AVI file\" "
+          "href=\"/video?dir=" + htmlEscape(dir) + "\">" + icon("down") +
+          "Download</a>"
           "<a class=btn href=\"/files?path=" + htmlEscape(parentOf(dir)) +
           "\">" + icon("up") + "Back</a></div>";
   body += "<script>const DIR='" + dir + "';</script>";
@@ -1416,6 +1420,129 @@ static esp_err_t cameraRetryHandler(httpd_req_t *req) {
 
 // Streams any file off the card in chunks. Recordings run to tens of megabytes,
 // so the whole file never exists in memory at once.
+// Names a recording for when it was made. Every recording holds a file of the
+// same name, so without this a morning's footage lands as video.mjpeg,
+// video(1).mjpeg, and so on, with nothing to say which was which. The two
+// directories above the file are the date and the time, which is exactly the
+// missing information.
+static String recordingFileName(const String &dir) {
+  const int up = dir.lastIndexOf('/');
+  if (up <= 0) return dir.substring(up + 1);
+  const String parent = dir.substring(0, up);
+  // A recording made before the clock reached an NTP server is numbered and
+  // sits in the root, where there is no date to put in front of it.
+  if (parent == "/rec") return dir.substring(up + 1);
+  return parent.substring(parent.lastIndexOf('/') + 1) + "-" + dir.substring(up + 1);
+}
+
+// Hands over a recording as a file that plays.
+//
+// The frames go out exactly as they are stored, so nothing is decoded and the
+// camera does no more work than it does for a plain download. What it adds is
+// the timing, which lives in the index and which a bare run of JPEGs has nowhere
+// to put: without it mpv treats a recording as a folder of photos at one frame a
+// second and ffmpeg assumes twenty five, so a twelve second clip plays as
+// eighty five seconds or as three.
+//
+// The index is read three times rather than held in memory, once to size the
+// file, once to place the frames and once to write the index the container
+// wants. A recording can run to thousands of frames, and reading a small file
+// three times costs less than a table that grows with how long someone recorded.
+static esp_err_t videoHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const String dir = queryParam(req, "dir", "");
+  const String videoPath = dir + "/video.mjpeg";
+  const String indexPath = dir + "/index.txt";
+  if (!sdPathIsSafe(dir) || !sdExists(videoPath) || !sdExists(indexPath)) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "no such recording", HTTPD_RESP_USE_STRLEN);
+  }
+
+  AviInfo info = {};
+  void *idx = nullptr;
+  if (!sdIndexOpen(indexPath, &idx)) return httpd_resp_send_500(req);
+  uint32_t off = 0, len = 0, atMs = 0;
+  while (sdIndexNext(idx, &off, &len, &atMs)) {
+    if (len == 0) continue;  // the later passes skip these too
+    info.frames++;
+    info.movieBytes += 8 + len + (len & 1);
+    if (len > info.maxFrameLen) info.maxFrameLen = len;
+    info.durMs = atMs;
+  }
+  sdIndexClose(idx);
+  if (info.frames == 0) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "recording has no frames", HTTPD_RESP_USE_STRLEN);
+  }
+
+  void *video = nullptr;
+  if (!sdOpenRead(videoPath, &video)) return httpd_resp_send_500(req);
+
+  uint8_t *buf = (uint8_t *)ps_malloc(info.maxFrameLen + AVI_HEADER_BYTES);
+  if (!buf) {
+    sdCloseRead(video);
+    return httpd_resp_send_500(req);
+  }
+
+  // The recording says what size it was made at, rather than the camera saying
+  // what size it is set to now: footage from before a resolution change is still
+  // on the card, and would otherwise be described wrongly.
+  info.width = 640;
+  info.height = 480;
+  const size_t head = sdReadAt(video, 0, buf, 1024);
+  aviJpegSize(buf, head, &info.width, &info.height);
+
+  const String name = recordingFileName(dir) + ".avi";
+  const String disp = "attachment; filename=\"" + name + "\"";
+  httpd_resp_set_type(req, "video/x-msvideo");
+  httpd_resp_set_hdr(req, "Content-Disposition", disp.c_str());
+
+  aviWriteHeader(buf, info);
+  esp_err_t res = httpd_resp_send_chunk(req, (const char *)buf, AVI_HEADER_BYTES);
+
+  if (res == ESP_OK && sdIndexOpen(indexPath, &idx)) {
+    while (res == ESP_OK && sdIndexNext(idx, &off, &len, &atMs)) {
+      if (len == 0) continue;
+      aviWriteChunkHeader(buf, len);
+      if (sdReadAt(video, off, buf + 8, len) != len) break;
+      // The chunk header, the frame and its pad byte go out together: three
+      // sends a frame would put three write calls on the wire for every frame of
+      // a recording that can hold thousands.
+      const size_t pad = len & 1;
+      if (pad) buf[8 + len] = 0;
+      res = httpd_resp_send_chunk(req, (const char *)buf, 8 + len + pad);
+    }
+    sdIndexClose(idx);
+  }
+
+  if (res == ESP_OK && sdIndexOpen(indexPath, &idx)) {
+    aviWriteIndexHeader(buf, info.frames);
+    size_t held = AVI_INDEX_HEADER_BYTES;
+    uint32_t at = AVI_FIRST_FRAME_OFFSET;
+    while (res == ESP_OK && sdIndexNext(idx, &off, &len, &atMs)) {
+      if (len == 0) continue;
+      aviWriteIndexEntry(buf + held, len, &at);
+      held += AVI_INDEX_ENTRY_BYTES;
+      // Entries are sixteen bytes each, so they are gathered into the frame
+      // buffer and sent in batches rather than one packet per frame.
+      if (held + AVI_INDEX_ENTRY_BYTES > info.maxFrameLen) {
+        res = httpd_resp_send_chunk(req, (const char *)buf, held);
+        held = 0;
+      }
+    }
+    sdIndexClose(idx);
+    if (res == ESP_OK && held > 0) {
+      res = httpd_resp_send_chunk(req, (const char *)buf, held);
+    }
+  }
+
+  free(buf);
+  sdCloseRead(video);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return res;
+}
+
 static esp_err_t downloadHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
 
@@ -1440,18 +1567,8 @@ static esp_err_t downloadHandler(httpd_req_t *req) {
   const int cut = path.lastIndexOf('/');
   String name = cut >= 0 ? path.substring(cut + 1) : path;
 
-  // Every recording holds a file of the same name, so downloading a morning's
-  // footage would otherwise land as video.mjpeg, video(1).mjpeg, and so on, with
-  // nothing to say which was which. The directories above it are the date and
-  // the time, which is exactly the missing information.
   if (name == "video.mjpeg" && cut > 0) {
-    const String dir = path.substring(0, cut);
-    const int up = dir.lastIndexOf('/');
-    if (up > 0) {
-      const String day = dir.substring(0, up);
-      name = day.substring(day.lastIndexOf('/') + 1) + "-" + dir.substring(up + 1) +
-             ".mjpeg";
-    }
+    name = recordingFileName(path.substring(0, cut)) + ".mjpeg";
   }
   const String disp = "attachment; filename=\"" + name + "\"";
 
@@ -1689,10 +1806,9 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
                 htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a> ";
       // The video is inside the directory, so without this the only way to keep
       // a recording was to open it and find the file by hand.
-      action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download the "
-                "video as an MJPEG file\" href=\"/download?path=" +
-                htmlEscape(entries[i].path) + "/video.mjpeg\">" + icon("down") +
-                "</a>";
+      action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download this "
+                "recording as an AVI file\" href=\"/video?dir=" +
+                htmlEscape(entries[i].path) + "\">" + icon("down") + "</a>";
     } else if (inDay && entries[i].isDir) {
       // Only inside a day: a directory in /rec is usually a day, not a recording.
       // A directory in a day with no readable index is a recording that was cut
@@ -2184,6 +2300,7 @@ bool startWebServers(bool cameraOk) {
       {"/files", HTTP_GET, filesPageHandler},
       {"/files", HTTP_POST, filesDeleteHandler},
       {"/download", HTTP_GET, downloadHandler},
+      {"/video", HTTP_GET, videoHandler},
       {"/play", HTTP_GET, playPageHandler},
       {"/recindex", HTTP_GET, recIndexHandler},
       {"/frame", HTTP_GET, frameHandler},

@@ -3,7 +3,11 @@
 
 #include "auth.h"
 
-static constexpr int MAX_SESSIONS = 4;
+// Four was enough when a browser was the only client. It is not enough now: a
+// recorder holds a session permanently, and two tabs plus a phone would evict it,
+// which reads as the camera going offline rather than as a session being dropped.
+// Each slot costs 37 bytes.
+static constexpr int MAX_SESSIONS = 12;
 static constexpr uint32_t SESSION_LIFETIME_S = 12UL * 60UL * 60UL;
 static constexpr size_t TOKEN_HEX_LEN = 32;
 static constexpr char NVS_NAMESPACE[] = "camauth";

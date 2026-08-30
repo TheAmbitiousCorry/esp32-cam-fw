@@ -4,6 +4,17 @@ Firmware for an AI-Thinker ESP32-CAM that streams video, records to an SD card,
 and is configured entirely from a web interface. No serial console or toolchain
 is needed after the first flash.
 
+Written from scratch as a learning project, and measured on real hardware rather
+than assumed: `docs/principles.md` records what the board taught us, with the
+number behind each rule.
+
+It signs you in over plain HTTP, with the password stored as a salted PBKDF2
+hash and compared in constant time, but there is no TLS. That is fine on a
+trusted network and nowhere else. Do not put it on the internet.
+
+To watch several of these on one screen, `esp32-cam-nvr` holds the credentials
+and fans out the streams: https://github.com/TheAmbitiousCorry/esp32-cam-nvr
+
 ## First run
 
 A camera with no stored settings broadcasts its own network.
@@ -152,3 +163,7 @@ The camera draws current spikes when the sensor initialises and when the radio
 transmits. Use a 5V supply rated at 1A or more and a short cable. An inadequate
 supply produces symptoms that look like unrelated faults: an undetected camera
 sensor, weak Wi-Fi signal, and repeated restarts.
+
+## Licence
+
+MIT. See `LICENSE`.

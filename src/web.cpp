@@ -1839,6 +1839,41 @@ static esp_err_t configJsonHandler(httpd_req_t *req) {
   return httpd_resp_send(req, json.c_str(), json.length());
 }
 
+// What firmware this camera is running, as JSON.
+//
+// The firmware page has shown this since it existed, rendered into a table for
+// a person. An aggregator asking twelve cameras whether they need updating
+// cannot read a table, and scraping one is a promise to break the next time the
+// page changes.
+static esp_err_t versionHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  String slot = "unknown";
+  if (running) {
+    const String label = running->label;
+    // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
+    // are two slots and the useful fact is which one is executing.
+    slot = (label.startsWith("app") && label.length() == 4) ? label.substring(3) + "/1" : label;
+  }
+
+  esp_ota_img_states_t otaState = ESP_OTA_IMG_VALID;
+  if (running) esp_ota_get_state_partition(running, &otaState);
+
+  TrialState trial;
+  trialLoad(trial);
+
+  String json = "{\"version\":\"" + jsonEscape(FIRMWARE_VERSION) + "\"";
+  json += ",\"built\":\"" + jsonEscape(String(__DATE__) + " " + __TIME__) + "\"";
+  json += ",\"slot\":\"" + jsonEscape(slot) + "\"";
+  json += ",\"onTrial\":";
+  json += (otaState == ESP_OTA_IMG_PENDING_VERIFY) ? "true" : "false";
+  json += ",\"rolledBackFrom\":\"" + jsonEscape(trial.rolledBackFrom) + "\"}";
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, json.c_str(), json.length());
+}
+
 static esp_err_t restartHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   const esp_err_t res = sendShell(req, "/status",
@@ -2962,6 +2997,7 @@ bool startWebServers(bool cameraOk) {
       {"/capture", HTTP_GET, captureHandler},
       {"/status", HTTP_GET, statusHandler},
       {"/config", HTTP_GET, configJsonHandler},
+      {"/version", HTTP_GET, versionHandler},
       {"/restart", HTTP_GET, restartHandler},
       {"/retrycam", HTTP_GET, cameraRetryHandler},
       {"/settings", HTTP_GET, settingsPageHandler},

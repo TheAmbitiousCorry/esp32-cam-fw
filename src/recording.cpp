@@ -324,12 +324,23 @@ void recordingTick() {
 
   // Publish a copy so a viewer sees what is being recorded without competing for
   // the camera. Allocated once, on the first frame, sized for this recording.
+  //
+  // The sequence number is odd while the buffer is being written and even when
+  // it holds a whole frame, so a reader can tell it caught the buffer mid-write
+  // and go round again. Holding a lock across a copy this size would block the
+  // other task for as long as the copy takes; letting it retry costs a copy only
+  // when the two actually collide.
   if (!pubBuf) pubBuf = (uint8_t *)ps_malloc(200 * 1024);
   if (pubBuf && fb->len <= 200 * 1024) {
-    memcpy(pubBuf, fb->buf, fb->len);
     portENTER_CRITICAL(&pubLock);
+    pubSeq++;  // now odd: writing
+    portEXIT_CRITICAL(&pubLock);
+
+    memcpy(pubBuf, fb->buf, fb->len);
     pubLen = fb->len;
-    pubSeq++;
+
+    portENTER_CRITICAL(&pubLock);
+    pubSeq++;  // now even: whole frame
     portEXIT_CRITICAL(&pubLock);
   }
   esp_camera_fb_return(fb);
@@ -356,15 +367,32 @@ void recordingTiming(uint32_t *grabMs, uint32_t *writeMs, uint32_t *indexMs) {
 bool recordingCopyLatest(uint8_t *dst, size_t dstLen, size_t *outLen, uint32_t *seq) {
   if (!pubBuf || !dst) return false;
 
-  portENTER_CRITICAL(&pubLock);
-  const uint32_t currentSeq = pubSeq;
-  const size_t currentLen = pubLen;
-  portEXIT_CRITICAL(&pubLock);
+  // Read the sequence, copy, then read it again. If it moved, the recorder
+  // overwrote the buffer part way through and what was copied is the front of
+  // one frame joined to the back of another: half a picture, which is what a
+  // torn frame looks like on screen. Three attempts, because a reader that keeps
+  // losing to a recorder writing every 40ms should return empty handed and let
+  // the next poll try rather than spin.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    portENTER_CRITICAL(&pubLock);
+    const uint32_t before = pubSeq;
+    portEXIT_CRITICAL(&pubLock);
 
-  if (currentSeq == *seq || currentLen == 0 || currentLen > dstLen) return false;
+    if (before & 1) continue;  // a write is in progress
+    const size_t currentLen = pubLen;
+    if (before == *seq || currentLen == 0 || currentLen > dstLen) return false;
 
-  memcpy(dst, pubBuf, currentLen);
-  *outLen = currentLen;
-  *seq = currentSeq;
-  return true;
+    memcpy(dst, pubBuf, currentLen);
+
+    portENTER_CRITICAL(&pubLock);
+    const uint32_t after = pubSeq;
+    portEXIT_CRITICAL(&pubLock);
+
+    if (after != before) continue;  // overwritten mid-copy, so try again
+
+    *outLen = currentLen;
+    *seq = before;
+    return true;
+  }
+  return false;
 }

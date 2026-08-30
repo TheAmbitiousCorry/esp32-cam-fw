@@ -108,11 +108,15 @@ bool cameraRetry() {
 
 bool cameraIsReady() { return cameraReady; }
 
-bool isCompleteJpeg(const camera_fb_t *fb) {
-  if (fb->len < 4) return false;
-  const bool soi = fb->buf[0] == 0xFF && fb->buf[1] == 0xD8;
-  const bool eoi = fb->buf[fb->len - 2] == 0xFF && fb->buf[fb->len - 1] == 0xD9;
+bool isCompleteJpegBuf(const uint8_t *buf, size_t len) {
+  if (!buf || len < 4) return false;
+  const bool soi = buf[0] == 0xFF && buf[1] == 0xD8;
+  const bool eoi = buf[len - 2] == 0xFF && buf[len - 1] == 0xD9;
   return soi && eoi;
+}
+
+bool isCompleteJpeg(const camera_fb_t *fb) {
+  return fb && isCompleteJpegBuf(fb->buf, fb->len);
 }
 
 // Timer 0 and channel 0 belong to the camera's XCLK, so the flash takes its own.

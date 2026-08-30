@@ -1178,7 +1178,8 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     if (recordingActive()) {
       if (!shared) shared = (uint8_t *)ps_malloc(200 * 1024);
       size_t len = 0;
-      if (!shared || !recordingCopyLatest(shared, 200 * 1024, &len, &sharedSeq)) {
+      if (!shared || !recordingCopyLatest(shared, 200 * 1024, &len, &sharedSeq) ||
+          !isCompleteJpegBuf(shared, len)) {
         delay(10);
         if (updating) break;
         continue;
@@ -1200,6 +1201,16 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     // Hand the frame to history and detection before sending it. They then need
     // no camera access of their own for as long as anyone is watching.
     motionObserve(fb);
+
+    // A frame the sensor tore is worse than a missed one: it draws as half a
+    // picture over the last good one, which is what the glitches were. The
+    // recorder has always dropped these; the stream was handing them straight to
+    // the browser.
+    if (!isCompleteJpeg(fb)) {
+      esp_camera_fb_return(fb);
+      if (updating) break;
+      continue;
+    }
 
     const size_t hlen = snprintf(partHeader, sizeof(partHeader), STREAM_PART, fb->len);
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));

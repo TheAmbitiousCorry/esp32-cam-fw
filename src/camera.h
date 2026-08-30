@@ -73,6 +73,10 @@ int cameraQuality();
 // start and end of image markers distinguish a whole frame from a partial one.
 bool isCompleteJpeg(const camera_fb_t *fb);
 
+// The same check on a raw buffer, for frames that arrive as bytes and a length
+// rather than in a driver frame buffer.
+bool isCompleteJpegBuf(const uint8_t *buf, size_t len);
+
 // The white LED on GPIO4. Driven through LEDC rather than a plain digital write
 // so brightness is available later; at full duty it is blinding at close range.
 // Note GPIO4 doubles as SD data line 1 in 4-bit mode, which is one reason to

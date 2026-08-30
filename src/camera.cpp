@@ -126,6 +126,19 @@ static constexpr int FLASH_LEDC_BITS = 8;
 static uint8_t flashDuty = 60;  // out of 255; full duty washes out anything close
 
 static bool flashOn = false;
+static uint32_t flashOnAt = 0;
+
+// The LED beside the lens is a camera flash, not a lamp. It is built for a burst
+// of a few hundred milliseconds and has no heatsinking for anything longer, so
+// nothing here can hold it on past this however a caller asks. The ceiling lives
+// in the driver rather than in the callers because getting it wrong costs a
+// board, and a rule that has to be remembered at four call sites is a rule that
+// will be forgotten at one of them.
+static constexpr uint32_t FLASH_MAX_ON_MS = 1500;
+
+// How long the sensor's exposure loop needs to react to the light, measured in
+// frames rather than milliseconds because that is what it actually depends on.
+static constexpr int FLASH_SETTLE_FRAMES = 4;
 
 void flashInit() {
   ledcAttachChannel(LED_GPIO_NUM, FLASH_LEDC_FREQ, FLASH_LEDC_BITS, FLASH_LEDC_CHANNEL);
@@ -135,7 +148,31 @@ void flashInit() {
 
 void flashSet(bool on) {
   flashOn = on;
+  flashOnAt = millis();
   ledcWrite(LED_GPIO_NUM, on ? flashDuty : 0);
+}
+
+void flashTick() {
+  if (!flashOn) return;
+  if (millis() - flashOnAt < FLASH_MAX_ON_MS) return;
+  Serial.println("flash: held on too long, forced off");
+  flashSet(false);
+}
+
+camera_fb_t *cameraGrabWithFlash() {
+  if (!cameraReady) return nullptr;
+
+  flashSet(true);
+  // Throw away the frames taken while the sensor is still adjusting. With three
+  // buffers in flight, the first frame back was exposed before the light came
+  // on, so returning it would give a dark picture and a lit room.
+  for (int i = 0; i < FLASH_SETTLE_FRAMES; i++) {
+    camera_fb_t *warm = esp_camera_fb_get();
+    if (warm) esp_camera_fb_return(warm);
+  }
+  camera_fb_t *fb = esp_camera_fb_get();
+  flashSet(false);
+  return fb;
 }
 
 bool flashIsOn() { return flashOn; }

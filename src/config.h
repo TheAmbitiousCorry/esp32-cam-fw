@@ -65,6 +65,12 @@ struct Config {
   bool vflip = false;
   uint8_t flashLevel = 60;
 
+  // One flash-lit still per motion event. The LED cannot light a scene
+  // continuously without cooking, but a single burst costs a few hundred
+  // milliseconds and gives one clear picture of whatever set the recording off,
+  // which is usually the thing you actually wanted from the footage.
+  bool flashOnMotion = false;
+
   uint16_t keepFreeMb = 512;
 
   // Motion schedule. Hours are local, and a start later than the end means the

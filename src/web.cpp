@@ -390,7 +390,7 @@ if (rb) {
 // shows it. Debounced because dragging a slider fires continuously and the
 // camera has better things to do.
 const imgFields = ['ael','gc','flashlvl','bri','con','sat','wb'];
-const imgChecks = ['autoimg','gray','hmir','vflip'];
+const imgChecks = ['autoimg','flashmot','gray','hmir','vflip'];
 let imgTimer = null;
 
 // Exposure and gain belong to the loop while auto is on. Leaving them live would
@@ -445,10 +445,15 @@ for (const f of imgFields.concat(imgChecks)) {
   });
 }
 
+// Arming is a browser-side state: the device never holds the LED on between
+// requests, so there is nothing on it to toggle. The capture link carries the
+// choice instead.
 const fb = document.getElementById('flash');
-if (fb) fb.onclick = async () => {
-  const state = await (await fetch('/flash', {method: 'POST'})).text();
-  fb.className = state === 'on' ? 'on' : '';
+const cap = document.getElementById('cap');
+if (fb && cap) fb.onclick = () => {
+  const armed = fb.className !== 'on';
+  fb.className = armed ? 'on' : '';
+  cap.href = armed ? '/capture?flash=1' : '/capture';
 };
 
 // The stream lives on its own port, so build the URL from wherever this page was
@@ -587,11 +592,13 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   }
 
   String body = "<h1>Live view</h1><div class=actions>";
-  body += String("<button id=flash data-tip=\"White LED. Brightness is under "
-                 "Image adjustments\" class=\"") + (flashIsOn() ? "on" : "") + "\">" +
+  // The flash arms rather than switches on. It is built for a burst, so the only
+  // thing that fires it is a capture, and it goes out again on its own.
+  body += String("<button id=flash data-tip=\"Fire the flash for the next "
+                 "capture. Brightness is under Image adjustments\" class=\"\">") +
           icon("bolt") + "</button>";
-  body += "<a class=btn href=\"/capture\" target=_blank data-tip=\"Open a full "
-          "resolution still in a new tab\">" + icon("image") + "</a>";
+  body += "<a id=cap class=btn href=\"/capture\" target=_blank data-tip=\"Open a "
+          "full resolution still in a new tab\">" + icon("image") + "</a>";
   body += String("<button id=rec data-tip=\"Start or stop recording. The dot is "
                  "red while recording, green while watching for motion\" class=\"") +
           (recordingActive() ? "on" : "") + "\">" +
@@ -632,6 +639,11 @@ static esp_err_t indexHandler(httpd_req_t *req) {
     body += "</select><small class=sub>Lower means darker but cleaner. Noise in the "
             "dark is what makes motion detection fire at nothing.</small>";
     range("flashlvl", "Flash brightness", 0, 255, c.flashLevel);
+    check("flashmot", "Flash one still on motion", c.flashOnMotion);
+    body += "<small class=sub>Fires the flash once when a recording starts and "
+            "saves the lit frame beside the video. The LED is built for a burst, "
+            "not for lighting a scene, so this is the only thing that uses it "
+            "unattended.</small>";
     range("bri", "Brightness", -2, 2, c.brightness);
     range("con", "Contrast", -2, 2, c.contrast);
     range("sat", "Saturation", -2, 2, c.saturation);
@@ -733,6 +745,7 @@ static esp_err_t imageHandler(httpd_req_t *req) {
   c.saturation = (int8_t)clampi(formField(body, "sat"), -2, 2, c.saturation);
   c.wbMode = (uint8_t)clampi(formField(body, "wb"), 0, 4, c.wbMode);
   c.flashLevel = (uint8_t)clampi(formField(body, "flashlvl"), 0, 255, c.flashLevel);
+  c.flashOnMotion = formField(body, "flashmot") == "1";
   c.grayscale = formField(body, "gray") == "1";
   c.hmirror = formField(body, "hmir") == "1";
   c.vflip = formField(body, "vflip") == "1";
@@ -749,17 +762,12 @@ static esp_err_t imageHandler(httpd_req_t *req) {
                          HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t flashHandler(httpd_req_t *req) {
-  if (!authGuardResource(req)) return ESP_OK;
-  flashSet(!flashIsOn());
-  httpd_resp_set_type(req, "text/plain");
-  return httpd_resp_send(req, flashIsOn() ? "on" : "off", HTTPD_RESP_USE_STRLEN);
-}
 
 static esp_err_t captureHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
 
-  camera_fb_t *fb = esp_camera_fb_get();
+  const bool withFlash = queryParam(req, "flash", "") == "1";
+  camera_fb_t *fb = withFlash ? cameraGrabWithFlash() : esp_camera_fb_get();
   if (!fb) {
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
@@ -946,6 +954,15 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
           "Download</a>"
           "<a class=btn href=\"/files?path=" + htmlEscape(parentOf(dir)) +
           "\">" + icon("up") + "Back</a></div>";
+
+  // A recording made with the motion flash on has one frame lit properly. It is
+  // the clearest look at whatever triggered the event, so it goes above the
+  // replay rather than being left as a file to find.
+  if (sdExists(dir + "/snap.jpg")) {
+    body += "<p class=sub>" + icon("bolt") +
+            "Flash-lit still, taken as the recording started.</p>"
+            "<img src=\"/download?view=1&path=" + htmlEscape(dir) + "/snap.jpg\" alt=\"\">";
+  }
   body += "<script>const DIR='" + dir + "';</script>";
   body += R"HTML(<script>
 const img = document.getElementById('p');
@@ -2435,7 +2452,6 @@ bool startWebServers(bool cameraOk) {
       {"/recording", HTTP_POST, recordingsPostHandler},
       {"/record", HTTP_GET, recordStateHandler},
       {"/record", HTTP_POST, recordHandler},
-      {"/flash", HTTP_POST, flashHandler},
       {"/image", HTTP_POST, imageHandler},
       {"/files", HTTP_GET, filesPageHandler},
       {"/files", HTTP_POST, filesDeleteHandler},

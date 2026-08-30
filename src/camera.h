@@ -66,6 +66,17 @@ uint8_t cameraAutoPosition(const ImageSettings &s);
 // which is why this is a setting rather than on or off.
 void flashSetLevel(uint8_t level);
 uint8_t flashLevel();
+
+// Fires the flash and returns a frame exposed under it, or the best frame it
+// could get. The sensor runs its own exposure loop and needs a few frames to
+// react to the light, so the ones taken before it has reacted are thrown away
+// rather than returned washed out or dark. The flash is off by the time this
+// returns, on every path out of it.
+camera_fb_t *cameraGrabWithFlash();
+
+// Forces the flash off if anything has held it on past its limit. Called from
+// the main loop, so a request that dies mid-capture cannot leave it burning.
+void flashTick();
 int cameraFrameSize();
 int cameraQuality();
 

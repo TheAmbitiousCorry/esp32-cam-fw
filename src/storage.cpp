@@ -311,6 +311,15 @@ bool sdWriteSmall(const String &path, const String &contents) {
   return n == contents.length();
 }
 
+bool sdWriteFile(const String &path, const uint8_t *data, size_t len) {
+  if (!mounted || !sdPathIsSafe(path) || !data) return false;
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) return false;
+  const size_t n = f.write(data, len);
+  f.close();
+  return n == len;
+}
+
 bool sdAppendSmall(const String &path, const String &contents) {
   if (!mounted || !sdPathIsSafe(path)) return false;
   File f = SD_MMC.open(path, FILE_APPEND);

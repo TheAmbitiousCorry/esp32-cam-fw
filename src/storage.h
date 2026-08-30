@@ -82,6 +82,10 @@ size_t sdFileSize(const String &path);
 String sdReadSmall(const String &path, size_t maxLen = 256);
 bool sdWriteSmall(const String &path, const String &contents);
 
+// Writes a whole buffer to a file. For a single still image: anything that
+// streams belongs in sdOpenRead and chunks.
+bool sdWriteFile(const String &path, const uint8_t *data, size_t len);
+
 // Adds a line to the end of a file, creating it if it is not there. The per-day
 // summary is append-only on purpose: rewriting it after every recording would
 // cost more than the reads it saves.

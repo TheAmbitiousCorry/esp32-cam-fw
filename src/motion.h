@@ -24,6 +24,11 @@ bool motionCheck(camera_fb_t *fb);
 void motionSetSensitivity(uint8_t percent);
 uint8_t motionSensitivity();
 
+// Mean brightness of the last frame checked, 0 to 255. The block averages are
+// computed for detection anyway, so their mean costs one more division and gives
+// auto exposure a measurement of the real scene rather than the sensor's guess.
+uint8_t motionBrightness();
+
 // How much of the scene changed on the last frame checked, as a percentage.
 // Reported so sensitivity can be set from what the camera actually sees.
 uint8_t motionLastChange();

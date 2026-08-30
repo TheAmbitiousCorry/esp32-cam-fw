@@ -19,6 +19,53 @@ bool cameraIsReady();
 //
 // frameSize is a framesize_t; quality is 10 (best) to 63 (worst).
 void cameraApplySettings(int frameSize, int quality);
+
+// Everything here is a sensor register write, so it takes effect on the next
+// frame with no reinitialisation. That is what makes these worth tuning by eye
+// while watching the picture, and why they are not grouped with frame size.
+struct ImageSettings {
+  int8_t aeLevel;      // -2..2, exposure compensation
+  uint8_t gainCeiling; // 0..6, GAINCEILING_2X..128X
+  int8_t brightness;   // -2..2
+  int8_t contrast;     // -2..2
+  int8_t saturation;   // -2..2
+  uint8_t wbMode;      // 0..4 auto, sunny, cloudy, office, home
+  bool grayscale;
+  bool hmirror;
+  bool vflip;
+};
+
+void cameraApplyImage(const ImageSettings &s);
+
+// Which controls this sensor refused, as a comma-separated list, or empty.
+//
+// The generic sensor interface offers thirty-odd setters and the OV2640
+// implements a subset; the rest return an error and change nothing. Rather than
+// hardcode a list from memory, which is how the frame size labels ended up wrong,
+// apply them and report what came back.
+String cameraUnsupported();
+
+// What the sensor is actually set to right now. Auto changes exposure and gain
+// without writing them to flash, so the stored config is not a truthful answer to
+// "what is the camera doing"; this is.
+const ImageSettings &cameraCurrentImage();
+
+// One step of auto exposure, given the scene brightness motion detection just
+// measured. Returns true when it moved something.
+//
+// The sensor runs its own auto exposure and gain already, and this does not
+// replace them. It corrects the cases their metering gets wrong: a bright window
+// behind a dark hallway, or a room lit only by a streetlight, where the sensor
+// settles on an average that leaves the part you care about unreadable.
+bool cameraAutoStep(uint8_t brightness, ImageSettings &s);
+
+// Where the ladder currently sits, 0 (darkest) to 10 (brightest), for display.
+uint8_t cameraAutoPosition(const ImageSettings &s);
+
+// 0 to 255. Full duty blows out anything within a metre and reflects off glass,
+// which is why this is a setting rather than on or off.
+void flashSetLevel(uint8_t level);
+uint8_t flashLevel();
 int cameraFrameSize();
 int cameraQuality();
 

@@ -166,9 +166,44 @@ static const char SHARED_CSS[] =
     "aside a.on{border-left:0;border-bottom-color:#2a7}}";
 
 // Wraps registration so a full handler table is loud rather than a mystery 404.
+struct Route {
+  const char *path;
+  httpd_method_t method;
+  esp_err_t (*fn)(httpd_req_t *);
+};
+
+static const Route *routeTable = nullptr;
+static size_t routeCount = 0;
+
+// Matches on the path alone; a query string is arguments, not identity.
+static ImageSettings imgOf(const Config &c) {
+  return ImageSettings{c.aeLevel,   c.gainCeiling, c.brightness, c.contrast,
+                       c.saturation, c.wbMode,     c.grayscale,  c.hmirror,
+                       c.vflip};
+}
+
+static esp_err_t dispatchHandler(httpd_req_t *req) {
+  String path = req->uri;
+  const int q = path.indexOf('?');
+  if (q >= 0) path = path.substring(0, q);
+
+  for (size_t i = 0; i < routeCount; i++) {
+    if (routeTable[i].method == req->method && path == routeTable[i].path) {
+      return routeTable[i].fn(req);
+    }
+  }
+
+  httpd_resp_set_status(req, "404 Not Found");
+  httpd_resp_set_type(req, "text/plain");
+  return httpd_resp_send(req, "no such page", HTTPD_RESP_USE_STRLEN);
+}
+
+static int failedRoutes = 0;
+
 static void registerUri(httpd_handle_t server, const httpd_uri_t *uri) {
   const esp_err_t err = httpd_register_uri_handler(server, uri);
   if (err != ESP_OK) {
+    failedRoutes++;
     Serial.printf("failed to register %s: %s\n", uri->uri, esp_err_to_name(err));
   }
 }
@@ -301,6 +336,16 @@ async function refreshRec() {
   // remembering what was set on another page.
   pct.textContent = s.motion ? ' ' + s.change + '/' + s.threshold + '%' : ' Record';
 
+  // Show where auto has settled, so a disabled slider still reads as working.
+  const auto = document.getElementById('autoimg');
+  if (auto && auto.checked && s.rung !== undefined) {
+    const ael = document.getElementById('ael'), gc = document.getElementById('gc');
+    if (ael) ael.value = s.ael;
+    if (gc) gc.value = s.gc;
+    const lab = document.getElementById('v_ael');
+    if (lab) lab.textContent = s.ael + ' (auto, scene ' + s.lux + '/255)';
+  }
+
   if (s.active) {
     stats.textContent = s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps' +
                         (s.triggered ? '  motion triggered' : '  started by hand');
@@ -321,10 +366,68 @@ if (rb) {
   setInterval(refreshRec, 2000);
 }
 
+// Applied on change: every one of these is a register write, so the next frame
+// shows it. Debounced because dragging a slider fires continuously and the
+// camera has better things to do.
+const imgFields = ['ael','gc','flashlvl','bri','con','sat','wb'];
+const imgChecks = ['autoimg','gray','hmir','vflip'];
+let imgTimer = null;
+
+// Exposure and gain belong to the loop while auto is on. Leaving them live would
+// let a slider fight a control loop, and the loop always wins.
+function autoOwns() {
+  const on = document.getElementById('autoimg');
+  for (const f of ['ael','gc']) {
+    const el = document.getElementById(f);
+    if (el) { el.disabled = on && on.checked; el.style.opacity = el.disabled ? '.5' : '1'; }
+  }
+}
+
+function sendImage() {
+  autoOwns();
+  const parts = [];
+  for (const f of imgFields) {
+    const el = document.getElementById(f);
+    if (!el) continue;
+    parts.push(f + '=' + encodeURIComponent(el.value));
+    const lab = document.getElementById('v_' + f);
+    if (lab) lab.textContent = el.value;
+  }
+  for (const f of imgChecks) {
+    const el = document.getElementById(f);
+    if (el) parts.push(f + '=' + (el.checked ? '1' : '0'));
+  }
+  fetch('/image', {method: 'POST',
+                   headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                   body: parts.join('&')})
+    .then(r => r.text())
+    .then(t => {
+      // The device replies with the controls this sensor refused. Mark them, so
+      // a slider that cannot do anything says why instead of feeling broken.
+      if (t === 'ok') return;
+      for (const name of t.split(',')) {
+        const lab = document.getElementById('v_' + name);
+        if (lab) lab.textContent = 'not supported by this sensor';
+        const el = document.getElementById(name);
+        if (el) { el.disabled = true; el.style.opacity = '.4'; }
+      }
+    });
+}
+
+for (const f of imgFields.concat(imgChecks)) {
+  const el = document.getElementById(f);
+  if (!el) continue;
+  el.addEventListener('input', () => {
+    const lab = document.getElementById('v_' + f);
+    if (lab) lab.textContent = el.value;
+    clearTimeout(imgTimer);
+    imgTimer = setTimeout(sendImage, 250);
+  });
+}
+
 const fb = document.getElementById('flash');
 if (fb) fb.onclick = async () => {
   const state = await (await fetch('/flash', {method: 'POST'})).text();
-  fb.textContent = 'Flash ' + state;
   fb.className = state === 'on' ? 'on' : '';
 };
 
@@ -464,14 +567,67 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   }
 
   String body = "<h1>Live view</h1><div class=actions>";
-  body += String("<button id=flash class=\"") + (flashIsOn() ? "on" : "") + "\">" +
-          icon("bolt") + "Flash " + (flashIsOn() ? "on" : "off") + "</button>";
-  body += "<a class=btn href=\"/capture\" target=_blank>" + icon("image") +
-          "Still image</a>";
-  body += String("<button id=rec class=\"") + (recordingActive() ? "on" : "") + "\">" +
+  body += String("<button id=flash data-tip=\"White LED. Brightness is under "
+                 "Image adjustments\" class=\"") + (flashIsOn() ? "on" : "") + "\">" +
+          icon("bolt") + "</button>";
+  body += "<a class=btn href=\"/capture\" target=_blank data-tip=\"Open a full "
+          "resolution still in a new tab\">" + icon("image") + "</a>";
+  body += String("<button id=rec data-tip=\"Start or stop recording. The dot is "
+                 "red while recording, green while watching for motion\" class=\"") +
+          (recordingActive() ? "on" : "") + "\">" +
           "<span id=recdot class=dot-off>" + icon("dot") + "</span>"
           "<span id=recpct></span></button></div>";
   body += "<p id=recstats></p>";
+
+  {
+    Config c;
+    configLoad(c);
+    auto range = [&body](const char *name, const char *label, int lo, int hi, int val) {
+      body += "<label style=\"margin:10px 0 2px\">" + String(label) +
+              " <span class=sub id=v_" + name + ">" + String(val) + "</span></label>"
+              "<input type=range name=" + String(name) + " id=" + String(name) +
+              " min=" + String(lo) + " max=" + String(hi) + " value=" + String(val) + ">";
+    };
+    auto check = [&body](const char *name, const char *label, bool on) {
+      body += String("<label style=\"display:flex;gap:6px;align-items:center;margin:8px 0\">"
+                     "<input type=checkbox id=") + name + " name=" + name +
+              (on ? " checked" : "") + " style=\"width:auto\">" + label + "</label>";
+    };
+
+    body += "<details style=\"max-width:340px;margin-top:8px\">"
+            "<summary class=sub style=\"cursor:pointer\">Image adjustments</summary>";
+    check("autoimg", "Auto exposure", c.autoImage);
+    body += "<small class=sub>Reads the scene every few seconds and sets exposure "
+            "and gain to suit it. Turn it off to hold a value by hand.</small>";
+    range("ael", "Exposure", -2, 2, c.aeLevel);
+    body += "<small class=sub>Raise it for scenes with a bright window behind the "
+            "subject.</small>";
+    body += "<label style=\"margin:10px 0 2px\">Gain limit</label>"
+            "<select id=gc name=gc>";
+    static const char *GAINS[] = {"2x", "4x", "8x", "16x", "32x", "64x", "128x"};
+    for (int i = 0; i < 7; i++) {
+      body += String("<option value=") + i + (c.gainCeiling == i ? " selected" : "") +
+              ">" + GAINS[i] + "</option>";
+    }
+    body += "</select><small class=sub>Lower means darker but cleaner. Noise in the "
+            "dark is what makes motion detection fire at nothing.</small>";
+    range("flashlvl", "Flash brightness", 0, 255, c.flashLevel);
+    range("bri", "Brightness", -2, 2, c.brightness);
+    range("con", "Contrast", -2, 2, c.contrast);
+    range("sat", "Saturation", -2, 2, c.saturation);
+    body += "<label style=\"margin:10px 0 2px\">White balance</label>"
+            "<select id=wb name=wb>";
+    static const char *WB[] = {"Auto", "Sunny", "Cloudy", "Office", "Home"};
+    for (int i = 0; i < 5; i++) {
+      body += String("<option value=") + i + (c.wbMode == i ? " selected" : "") +
+              ">" + WB[i] + "</option>";
+    }
+    body += "</select>";
+    check("gray", "Grayscale", c.grayscale);
+    check("hmir", "Mirror horizontally", c.hmirror);
+    check("vflip", "Flip vertically", c.vflip);
+    body += "</details>";
+  }
   body += INDEX_BODY;
   return sendShell(req, "/", body);
 }
@@ -491,7 +647,8 @@ static esp_err_t recordStateHandler(httpd_req_t *req) {
            "{\"active\":%s,\"frames\":%lu,\"fps\":%.1f,"
            "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu,"
            "\"triggered\":%s,\"motion\":%s,\"armed\":%s,\"change\":%u,"
-           "\"threshold\":%u,\"preFrames\":%lu,\"preSecs\":%lu}",
+           "\"threshold\":%u,\"preFrames\":%lu,\"preSecs\":%lu,"
+           "\"lux\":%u,\"rung\":%u,\"ael\":%d,\"gc\":%u}",
            recordingActive() ? "true" : "false",
            (unsigned long)recordingFrames(), recordingFps(),
            (unsigned long)grab, (unsigned long)write, (unsigned long)index,
@@ -499,7 +656,10 @@ static esp_err_t recordStateHandler(httpd_req_t *req) {
            c.motionEnabled ? "true" : "false",
            motionArmed() ? "true" : "false", motionLastChange(),
            c.motionSensitivity,
-           (unsigned long)prerollFrames(), (unsigned long)prerollSeconds());
+           (unsigned long)prerollFrames(), (unsigned long)prerollSeconds(),
+           motionBrightness(), cameraAutoPosition(cameraCurrentImage()),
+           (int)cameraCurrentImage().aeLevel,
+           (unsigned)cameraCurrentImage().gainCeiling);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
 }
@@ -517,6 +677,56 @@ static esp_err_t recordHandler(httpd_req_t *req) {
                            HTTPD_RESP_USE_STRLEN);
   }
   return httpd_resp_send(req, "recording", HTTPD_RESP_USE_STRLEN);
+}
+
+// Every value here is a sensor register, so applying on change is honest: the
+// next frame shows the result. Saved at the same time, since a control you have
+// to remember to save is a control people leave wrong.
+static esp_err_t imageHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  String body;
+  if (!readBody(req, body, 512)) return httpd_resp_send_500(req);
+
+  Config c;
+  if (!configLoad(c)) return httpd_resp_send_500(req);
+
+  auto clampi = [](const String &v, int lo, int hi, int fallback) {
+    if (v.isEmpty()) return fallback;
+    const int n = v.toInt();
+    return n < lo ? lo : (n > hi ? hi : n);
+  };
+
+  c.autoImage = formField(body, "autoimg") == "1";
+  if (!c.autoImage) {
+    // Only accept these while they are the user's to set. Under auto the loop owns
+    // them, and a form posted from a page that loaded minutes ago would otherwise
+    // drag the exposure back to whatever it looked like then.
+    c.aeLevel = (int8_t)clampi(formField(body, "ael"), -2, 2, c.aeLevel);
+    c.gainCeiling = (uint8_t)clampi(formField(body, "gc"), 0, 6, c.gainCeiling);
+  } else {
+    c.aeLevel = cameraCurrentImage().aeLevel;
+    c.gainCeiling = cameraCurrentImage().gainCeiling;
+  }
+  c.brightness = (int8_t)clampi(formField(body, "bri"), -2, 2, c.brightness);
+  c.contrast = (int8_t)clampi(formField(body, "con"), -2, 2, c.contrast);
+  c.saturation = (int8_t)clampi(formField(body, "sat"), -2, 2, c.saturation);
+  c.wbMode = (uint8_t)clampi(formField(body, "wb"), 0, 4, c.wbMode);
+  c.flashLevel = (uint8_t)clampi(formField(body, "flashlvl"), 0, 255, c.flashLevel);
+  c.grayscale = formField(body, "gray") == "1";
+  c.hmirror = formField(body, "hmir") == "1";
+  c.vflip = formField(body, "vflip") == "1";
+
+  cameraApplyImage(imgOf(c));
+  flashSetLevel(c.flashLevel);
+  configSave(c);
+
+  // The page marks whatever came back as refused, so a control that does nothing
+  // says so rather than looking broken.
+  const String refused = cameraUnsupported();
+  httpd_resp_set_type(req, "text/plain");
+  return httpd_resp_send(req, refused.isEmpty() ? "ok" : refused.c_str(),
+                         HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t flashHandler(httpd_req_t *req) {

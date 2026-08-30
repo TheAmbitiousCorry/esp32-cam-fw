@@ -22,6 +22,7 @@ static uint8_t *scratch = nullptr;
 static size_t scratchSize = 0;
 static bool havePrevious = false;
 static uint8_t sensitivity = 20;  // percent of blocks that must change
+static uint8_t lastBrightness = 0;
 static uint8_t lastChange = 0;
 
 void motionInit() {
@@ -35,6 +36,7 @@ void motionSetSensitivity(uint8_t percent) {
 
 uint8_t motionSensitivity() { return sensitivity; }
 uint8_t motionLastChange() { return lastChange; }
+uint8_t motionBrightness() { return lastBrightness; }
 
 bool motionCheck(camera_fb_t *fb) {
   if (!fb || fb->format != PIXFORMAT_JPEG) return false;
@@ -75,9 +77,12 @@ bool motionCheck(camera_fb_t *fb) {
     }
   }
   uint8_t current[BLOCKS];
+  uint32_t total = 0;
   for (int i = 0; i < BLOCKS; i++) {
     current[i] = counts[i] ? (uint8_t)(sums[i] / counts[i]) : 0;
+    total += current[i];
   }
+  lastBrightness = (uint8_t)(total / BLOCKS);
 
   if (!havePrevious) {
     memcpy(previous, current, BLOCKS);

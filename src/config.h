@@ -47,6 +47,24 @@ struct Config {
   uint8_t frameSize = 0;  // 0 means "unset", replaced on load
   uint8_t jpegQuality = 12;
 
+  // Live-adjustable image controls. Defaults are the sensor's own, so an
+  // untouched camera behaves exactly as it did before these existed.
+  //
+  // Under auto, exposure and gain are driven by the measured scene and are not
+  // saved. They settle again a few seconds after any boot, and persisting a
+  // value that changes with the light would wear the flash for nothing.
+  bool autoImage = true;
+  int8_t aeLevel = 0;
+  uint8_t gainCeiling = 0;  // GAINCEILING_2X
+  int8_t brightness = 0;
+  int8_t contrast = 0;
+  int8_t saturation = 0;
+  uint8_t wbMode = 0;
+  bool grayscale = false;
+  bool hmirror = false;
+  bool vflip = false;
+  uint8_t flashLevel = 60;
+
   uint16_t keepFreeMb = 512;
 
   // Motion schedule. Hours are local, and a start later than the end means the
@@ -62,6 +80,12 @@ struct Config {
 };
 
 bool configLoad(Config &out);
+
+// Bumped by every save. The main loop keeps its own copy of the settings and the
+// web server runs on another task with its own; without this the loop would go on
+// using whatever it read at boot, which is how auto exposure carried on adjusting
+// after it had been switched off.
+uint32_t configRevision();
 bool configSave(const Config &cfg);
 void configClear();
 

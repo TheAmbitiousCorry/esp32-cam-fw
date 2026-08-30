@@ -119,7 +119,7 @@ bool isCompleteJpeg(const camera_fb_t *fb) {
 static constexpr int FLASH_LEDC_CHANNEL = 2;
 static constexpr int FLASH_LEDC_FREQ = 5000;
 static constexpr int FLASH_LEDC_BITS = 8;
-static constexpr int FLASH_DUTY_ON = 60;  // out of 255; full duty washes out anything close
+static uint8_t flashDuty = 60;  // out of 255; full duty washes out anything close
 
 static bool flashOn = false;
 
@@ -131,7 +131,7 @@ void flashInit() {
 
 void flashSet(bool on) {
   flashOn = on;
-  ledcWrite(LED_GPIO_NUM, on ? FLASH_DUTY_ON : 0);
+  ledcWrite(LED_GPIO_NUM, on ? flashDuty : 0);
 }
 
 bool flashIsOn() { return flashOn; }
@@ -162,3 +162,97 @@ void cameraApplySettings(int frameSize, int quality) {
 
 int cameraFrameSize() { return currentFrameSize; }
 int cameraQuality() { return currentQuality; }
+
+static String unsupported;
+static ImageSettings applied;
+
+void cameraApplyImage(const ImageSettings &s) {
+  if (!cameraReady) return;
+  sensor_t *sensor = esp_camera_sensor_get();
+  if (!sensor) return;
+
+  unsupported = "";
+  applied = s;
+  auto tried = [&](const char *name, int result) {
+    // A negative return means this sensor does not implement the control. Saying
+    // so beats a slider that moves and does nothing.
+    if (result < 0) {
+      if (!unsupported.isEmpty()) unsupported += ",";
+      unsupported += name;
+    }
+  };
+
+  tried("ael", sensor->set_ae_level(sensor, s.aeLevel));
+  tried("gc", sensor->set_gainceiling(sensor, (gainceiling_t)s.gainCeiling));
+  tried("bri", sensor->set_brightness(sensor, s.brightness));
+  tried("con", sensor->set_contrast(sensor, s.contrast));
+  tried("sat", sensor->set_saturation(sensor, s.saturation));
+
+  // Fixed white balance only takes effect with the gain path on, so the two are
+  // set together rather than leaving a mode that silently does nothing.
+  sensor->set_awb_gain(sensor, 1);
+  tried("wb", sensor->set_wb_mode(sensor, s.wbMode));
+
+  // 2 is grayscale in the effects table. At night colour is mostly noise, and
+  // mono compresses smaller as well as looking cleaner.
+  tried("gray", sensor->set_special_effect(sensor, s.grayscale ? 2 : 0));
+  tried("hmir", sensor->set_hmirror(sensor, s.hmirror ? 1 : 0));
+  tried("vflip", sensor->set_vflip(sensor, s.vflip ? 1 : 0));
+
+  if (!unsupported.isEmpty()) {
+    Serial.printf("sensor refused: %s\n", unsupported.c_str());
+  }
+}
+
+String cameraUnsupported() { return unsupported; }
+const ImageSettings &cameraCurrentImage() { return applied; }
+
+void flashSetLevel(uint8_t level) {
+  flashDuty = level;
+  if (flashOn) ledcWrite(LED_GPIO_NUM, flashDuty);
+}
+
+uint8_t flashLevel() { return flashDuty; }
+
+// Exposure compensation and gain ceiling both trade darkness for noise, so auto
+// treats them as one ladder rather than two independent loops that could fight.
+// Rungs 0 to 4 spend exposure compensation, which is free; only above that does
+// it start buying brightness with gain, and coming back down sheds the noisy gain
+// first. One number, always monotonic in brightness.
+static constexpr uint8_t AUTO_MAX_POS = 10;
+static constexpr uint8_t AUTO_TARGET = 110;   // mid grey, of 255
+static constexpr uint8_t AUTO_DEADBAND = 22;  // wide, so it settles instead of hunting
+
+uint8_t cameraAutoPosition(const ImageSettings &s) {
+  if (s.gainCeiling > 0) return (uint8_t)(4 + min<int>(s.gainCeiling, 6));
+  return (uint8_t)constrain(s.aeLevel + 2, 0, 4);
+}
+
+static void autoApplyPosition(uint8_t pos, ImageSettings &s) {
+  s.aeLevel = (int8_t)(-2 + min<int>(pos, 4));
+  s.gainCeiling = (uint8_t)(pos > 4 ? pos - 4 : 0);
+}
+
+bool cameraAutoStep(uint8_t brightness, ImageSettings &s) {
+  // Two readings in a row before moving. A single frame goes dark when someone
+  // walks past the lens, and chasing that would swing the whole scene.
+  static int8_t pending = 0;
+
+  const int8_t want = brightness < AUTO_TARGET - AUTO_DEADBAND   ? 1
+                      : brightness > AUTO_TARGET + AUTO_DEADBAND ? -1
+                                                                 : 0;
+  if (want == 0 || want != pending) {
+    pending = want;
+    return false;
+  }
+  pending = 0;
+
+  const uint8_t pos = cameraAutoPosition(s);
+  const int next = constrain(pos + want, 0, AUTO_MAX_POS);
+  if (next == pos) return false;
+
+  autoApplyPosition((uint8_t)next, s);
+  cameraApplyImage(s);
+  Serial.printf("auto exposure: brightness %u, rung %u -> %d\n", brightness, pos, next);
+  return true;
+}

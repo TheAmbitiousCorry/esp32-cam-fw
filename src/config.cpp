@@ -70,6 +70,9 @@ bool passwordMatches(const Config &cfg, const String &password) {
   return diff == 0;
 }
 
+static volatile uint32_t revision = 0;
+uint32_t configRevision() { return revision; }
+
 bool configLoad(Config &out) {
   Preferences prefs;
   if (!prefs.begin(NVS_NAMESPACE, true)) return false;
@@ -90,6 +93,17 @@ bool configLoad(Config &out) {
   out.quietSeconds = prefs.getUChar("quietsec", 5);
   out.frameSize = prefs.getUChar("fsize", (uint8_t)FRAMESIZE_SVGA);
   out.jpegQuality = prefs.getUChar("jq", 12);
+  out.autoImage = prefs.getBool("auto", true);
+  out.aeLevel = (int8_t)prefs.getChar("ael", 0);
+  out.gainCeiling = prefs.getUChar("gc", 0);
+  out.brightness = (int8_t)prefs.getChar("bri", 0);
+  out.contrast = (int8_t)prefs.getChar("con", 0);
+  out.saturation = (int8_t)prefs.getChar("sat", 0);
+  out.wbMode = prefs.getUChar("wb", 0);
+  out.grayscale = prefs.getBool("gray", false);
+  out.hmirror = prefs.getBool("hmir", false);
+  out.vflip = prefs.getBool("vflip", false);
+  out.flashLevel = prefs.getUChar("flash", 60);
   out.keepFreeMb = prefs.getUShort("keepfree", 512);
   out.scheduleEnabled = prefs.getBool("schen", false);
   out.scheduleFromHour = prefs.getUChar("schfrom", 22);
@@ -126,6 +140,17 @@ bool configSave(const Config &cfg) {
   prefs.putUChar("quietsec", cfg.quietSeconds);
   prefs.putUChar("fsize", cfg.frameSize);
   prefs.putUChar("jq", cfg.jpegQuality);
+  prefs.putBool("auto", cfg.autoImage);
+  prefs.putChar("ael", cfg.aeLevel);
+  prefs.putUChar("gc", cfg.gainCeiling);
+  prefs.putChar("bri", cfg.brightness);
+  prefs.putChar("con", cfg.contrast);
+  prefs.putChar("sat", cfg.saturation);
+  prefs.putUChar("wb", cfg.wbMode);
+  prefs.putBool("gray", cfg.grayscale);
+  prefs.putBool("hmir", cfg.hmirror);
+  prefs.putBool("vflip", cfg.vflip);
+  prefs.putUChar("flash", cfg.flashLevel);
   prefs.putUShort("keepfree", cfg.keepFreeMb);
   prefs.putBool("schen", cfg.scheduleEnabled);
   prefs.putUChar("schfrom", cfg.scheduleFromHour);
@@ -134,12 +159,20 @@ bool configSave(const Config &cfg) {
   prefs.putBool("apwin", cfg.apWindow);
   prefs.putBool("done", true);
   prefs.end();
+  revision++;
   return true;
 }
 
 void configClear() {
   Preferences prefs;
   if (prefs.begin(NVS_NAMESPACE, false)) {
+    prefs.clear();
+    prefs.end();
+  }
+
+  // Sessions outlive a reboot now, so wiping the credentials has to wipe them
+  // too. Otherwise a factory reset would leave a cookie that still signs in.
+  if (prefs.begin("camauth", false)) {
     prefs.clear();
     prefs.end();
   }

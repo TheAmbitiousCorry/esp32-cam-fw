@@ -286,6 +286,10 @@ static void startWifi() {
 // trigger. With five seconds of history behind the trigger, that is paid for.
 static constexpr uint32_t PREROLL_INTERVAL_MS = 200;   // 5 fps of history
 static constexpr uint32_t MOTION_INTERVAL_MS = 800;    // decode rate
+// Auto exposure only needs to know what the light is doing, which changes over
+// minutes, so it samples far more slowly than detection does when detection is
+// off. Light does not need chasing at five frames a second.
+static constexpr uint32_t AUTO_INTERVAL_MS = 3000;
 
 // After a recording ends, ignore motion for a moment. Without it the movement
 // that ends one recording immediately starts the next.
@@ -327,19 +331,65 @@ static bool stillMoving(camera_fb_t *fb) {
 
 bool motionArmed() { return cfg.motionEnabled && withinSchedule(); }
 
-void motionObserve(camera_fb_t *fb) {
-  if (!fb || !motionArmed() || recordingActive()) return;
-  if ((int32_t)(millis() - motionBlockedUntil) < 0) return;
+// Reads the sensor's current image settings, since auto owns two of them and the
+// rest stay wherever the user left them.
+static ImageSettings imageFromConfig() {
+  return ImageSettings{cfg.aeLevel,    cfg.gainCeiling, cfg.brightness,
+                       cfg.contrast,   cfg.saturation,  cfg.wbMode,
+                       cfg.grayscale,  cfg.hmirror,     cfg.vflip};
+}
 
-  if (cfg.prerollSeconds > 0 && millis() - lastPrerollPush >= PREROLL_INTERVAL_MS) {
+// One rung of the exposure ladder, if the scene has been asking for it. Nothing
+// is written to flash: the rung is a reading of the current light, not a setting
+// the user chose, and it finds its level again a few seconds after any boot.
+static void autoExposure() {
+  if (!cfg.autoImage) return;
+  // The ladder's position is the sensor's, not the stored config's, so reloading
+  // settings from flash cannot knock it back to where it was at boot.
+  ImageSettings s = cameraCurrentImage();
+  cameraAutoStep(motionBrightness(), s);
+}
+
+void motionObserve(camera_fb_t *fb) {
+  if (!fb) return;
+  const bool armed = motionArmed() && !recordingActive() &&
+                     (int32_t)(millis() - motionBlockedUntil) >= 0;
+  if (!armed && !cfg.autoImage) return;
+
+  if (armed && cfg.prerollSeconds > 0 &&
+      millis() - lastPrerollPush >= PREROLL_INTERVAL_MS) {
     lastPrerollPush = millis();
     prerollPush(fb);
   }
-  if (millis() - lastMotionCheck >= MOTION_INTERVAL_MS) {
+
+  // Detection and auto exposure both want the same decode, so they share it. With
+  // detection off, the shared frame is sampled at the slower rate auto needs.
+  if (millis() - lastMotionCheck >= (armed ? MOTION_INTERVAL_MS : AUTO_INTERVAL_MS)) {
     lastMotionCheck = millis();
-    if (motionCheck(fb)) observedMoved = true;
+    const bool moved = motionCheck(fb);
+    if (moved && armed) observedMoved = true;
+    autoExposure();
   }
-  lastObservedAt = millis();
+  if (armed) lastObservedAt = millis();
+}
+
+// Auto exposure with nobody watching. A viewer's frames come through
+// motionObserve() and cost nothing extra; this is the fallback for an idle
+// camera, deliberately slow because a second consumer competes for the sensor.
+static uint32_t lastAutoGrab = 0;
+static uint32_t seenRevision = 0;
+static void autoTick() {
+  if (!cfg.autoImage || !cameraReady || portalMode) return;
+  if (recordingActive() || motionArmed()) return;  // those paths already sample
+  if (millis() - lastObservedAt < 2000) return;    // a viewer is feeding us
+  if (millis() - lastAutoGrab < AUTO_INTERVAL_MS) return;
+  lastAutoGrab = millis();
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) return;
+  motionCheck(fb);
+  esp_camera_fb_return(fb);
+  autoExposure();
 }
 
 static void motionTick() {
@@ -379,6 +429,9 @@ static void motionTick() {
       if (motionCheck(fb)) moved = true;
     }
     esp_camera_fb_return(fb);
+    // This path owns the frame when motion is armed and nobody is watching, so
+    // auto exposure has to be fed here too or it only runs while someone looks.
+    if (wantDetect) autoExposure();
   }
 
   if (moved) {
@@ -495,6 +548,12 @@ void setup() {
   cameraReady = cameraInit();
   cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
 
+  // Stored image settings are the sensor's defaults until someone changes them,
+  // so an untouched camera behaves exactly as it did before these existed.
+  const ImageSettings img = imageFromConfig();
+  cameraApplyImage(img);
+  flashSetLevel(cfg.flashLevel);
+
   // A megabyte and a half holds roughly five seconds at 640x480 and less at
   // larger sizes, which is why the buffer is bounded by bytes and reports how
   // many seconds it actually managed.
@@ -536,7 +595,15 @@ void loop() {
   portalLoop();
   statusLedTick();
   recordingTick();
+  // The web server runs on its own task and saves to flash; without this the loop
+  // would keep using the settings it read at boot.
+  if (configRevision() != seenRevision) {
+    seenRevision = configRevision();
+    configLoad(cfg);
+    motionSetSensitivity(cfg.motionSensitivity);
+  }
   motionTick();
+  autoTick();
 
   // Serial capture is kept as a fallback for when the network is the thing that
   // is broken, which is exactly when the browser view is no help.

@@ -18,3 +18,8 @@ void webSetBootPress(int presses, int needed);
 // Does not stop the servers: a handler that loops until its client disconnects
 // cannot be stopped from outside, and httpd_stop() waits for it forever.
 void webBeginUpdate();
+
+// How many people are watching, and how many can. A viewer count is the first
+// thing to check when a stream will not start.
+int streamViewerCount();
+int streamViewerLimit();

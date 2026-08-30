@@ -785,8 +785,7 @@ static esp_err_t captureHandler(httpd_req_t *req) {
 // ordinary <img> plays it with no client-side decoding. Paced from the
 // timestamps in the index, so it runs at the speed it was recorded rather than
 // as fast as the card can read.
-static esp_err_t playStreamHandler(httpd_req_t *req) {
-  if (!authGuardResource(req)) return ESP_OK;
+static esp_err_t replayStream(httpd_req_t *req) {
 
   const String dir = queryParam(req, "dir", "");
   if (!sdPathIsSafe(dir) || !sdExists(dir + "/index.txt")) {
@@ -1175,10 +1174,31 @@ attachZoom('zw', 'p', 'zlabel');
   return sendShell(req, "/files", body);
 }
 
-static esp_err_t streamHandler(httpd_req_t *req) {
-  // The browser sends the session cookie with the <img> request, because cookies
-  // are scoped to the host and ignore the port this server listens on.
-  if (!authGuardResource(req)) return ESP_OK;
+// Motion detection keeps its state in a handful of statics written once per
+// frame. One viewer feeding it is what it was built for; three feeding it at
+// once would corrupt the comparison rather than speed it up, so the first
+// stream to start claims detection and the rest just send pictures.
+static portMUX_TYPE detectorLock = portMUX_INITIALIZER_UNLOCKED;
+static bool detectorTaken = false;
+
+static bool claimDetector() {
+  bool got = false;
+  portENTER_CRITICAL(&detectorLock);
+  if (!detectorTaken) {
+    detectorTaken = true;
+    got = true;
+  }
+  portEXIT_CRITICAL(&detectorLock);
+  return got;
+}
+
+static void releaseDetector() {
+  portENTER_CRITICAL(&detectorLock);
+  detectorTaken = false;
+  portEXIT_CRITICAL(&detectorLock);
+}
+
+static esp_err_t liveStream(httpd_req_t *req) {
 
   esp_err_t res = httpd_resp_set_type(req, STREAM_TYPE);
   if (res != ESP_OK) return res;
@@ -1190,6 +1210,7 @@ static esp_err_t streamHandler(httpd_req_t *req) {
   // frame. Grabbing here as well starves it.
   uint8_t *shared = nullptr;
   uint32_t sharedSeq = 0;
+  const bool detector = claimDetector();
 
   while (true) {
     if (recordingActive()) {
@@ -1217,7 +1238,7 @@ static esp_err_t streamHandler(httpd_req_t *req) {
 
     // Hand the frame to history and detection before sending it. They then need
     // no camera access of their own for as long as anyone is watching.
-    motionObserve(fb);
+    if (detector) motionObserve(fb);
 
     // A frame the sensor tore is worse than a missed one: it draws as half a
     // picture over the last good one, which is what the glitches were. The
@@ -1242,6 +1263,7 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     if (updating) break;        // firmware is being written; release the camera
   }
   if (shared) free(shared);
+  if (detector) releaseDetector();
   return res;
 }
 
@@ -1280,6 +1302,8 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   row("Address", online ? WiFi.localIP().toString() : String("none"));
   row("Signal", online ? String(WiFi.RSSI()) + " dBm" : String("n/a"));
   row("Reconnects", String(reconnectTally));
+  row("Viewers", String(streamViewerCount()) + " of " + String(streamViewerLimit()) +
+                     " watching");
   if (sdMounted()) {
     row("SD card", sdCardType() + ", " + formatSize(sdTotalBytes()) + ", " +
                        formatSize(sdTotalBytes() - sdUsedBytes()) + " free" +
@@ -2422,6 +2446,90 @@ static esp_err_t updatePostHandler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// Streaming holds a connection open for as long as someone is watching, and an
+// esp_http_server handler runs on its server's own task. A handler that never
+// returns is a server that never serves again: with one viewer connected a
+// second got no response at all, not even headers, and a viewer that vanished
+// without closing cleanly wedged the port until the camera was rebooted, which
+// reads as the camera going offline.
+//
+// So the handler no longer streams. It hands the request to a worker and
+// returns, which is what httpd_req_async_handler_begin exists for, and the
+// server task goes straight back to accepting connections.
+//
+// Three workers, because the sensor's frame rate is shared between whoever is
+// watching and dividing it much further stops being a live view. That is enough
+// for the aggregator, a browser, and one spare.
+static constexpr int STREAM_WORKERS = 3;
+static constexpr uint32_t STREAM_WORKER_STACK = 6144;
+
+struct StreamJob {
+  httpd_req_t *req;
+  bool replay;
+};
+
+static QueueHandle_t streamJobs = nullptr;
+static volatile int streamViewers = 0;
+
+static void streamWorker(void *) {
+  for (;;) {
+    StreamJob job = {};
+    if (xQueueReceive(streamJobs, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (job.replay) {
+      replayStream(job.req);
+    } else {
+      liveStream(job.req);
+    }
+    // Without this the server keeps the socket and eventually stops accepting
+    // connections altogether, which is the failure this whole change exists to
+    // remove. It runs on every path out of a stream, including a failed one.
+    httpd_req_async_handler_complete(job.req);
+    streamViewers--;
+  }
+}
+
+static esp_err_t queueStream(httpd_req_t *req, bool replay) {
+  if (!streamJobs || streamViewers >= STREAM_WORKERS) {
+    // Said plainly rather than left to time out. A viewer that is turned away
+    // knows to try again; one left hanging looks like a camera that has died.
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "all viewer slots are in use", HTTPD_RESP_USE_STRLEN);
+  }
+
+  httpd_req_t *copy = nullptr;
+  if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+    return httpd_resp_send_500(req);
+  }
+  // Counted here rather than in the worker: three requests could otherwise all
+  // pass the check above before the first of them was counted.
+  streamViewers++;
+  const StreamJob job = {copy, replay};
+  if (xQueueSend(streamJobs, &job, 0) != pdTRUE) {
+    streamViewers--;
+    httpd_req_async_handler_complete(copy);
+    return httpd_resp_send_500(req);
+  }
+  return ESP_OK;
+}
+
+static esp_err_t streamHandler(httpd_req_t *req) {
+  // The browser sends the session cookie with the <img> request, because cookies
+  // are scoped to the host and ignore the port this server listens on.
+  if (!authGuardResource(req)) return ESP_OK;
+  return queueStream(req, false);
+}
+
+static esp_err_t playStreamHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+  return queueStream(req, true);
+}
+
+// How many people are watching, for the status page: a viewer count is the
+// first thing to check when a stream will not start.
+int streamViewerCount() { return streamViewers; }
+int streamViewerLimit() { return STREAM_WORKERS; }
+
 bool startWebServers(bool cameraOk) {
   cameraAvailable = cameraOk;
 
@@ -2495,6 +2603,10 @@ bool startWebServers(bool cameraOk) {
   cfg.server_port = 81;
   cfg.ctrl_port = 32769;  // must differ, or the second server refuses to start
   cfg.uri_match_fn = nullptr;
+  // A viewer that cannot take a frame within ten seconds has gone, not slowed
+  // down: twenty kilobytes at two a second is nobody watching. Bounding the wait
+  // is what stops one dead connection holding a worker for half a minute.
+  cfg.send_wait_timeout = 10;
   if (httpd_start(&streamServer, &cfg) != ESP_OK) {
     Serial.println("stream server failed to start");
     return false;
@@ -2503,6 +2615,20 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t replay = {"/playstream", HTTP_GET, playStreamHandler, nullptr};
   registerUri(streamServer, &stream);
   registerUri(streamServer, &replay);
+
+  streamJobs = xQueueCreate(STREAM_WORKERS, sizeof(StreamJob));
+  if (!streamJobs) {
+    Serial.println("stream workers: queue could not be created");
+    return false;
+  }
+  for (int i = 0; i < STREAM_WORKERS; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "stream%d", i);
+    if (xTaskCreate(streamWorker, name, STREAM_WORKER_STACK, nullptr, 4, nullptr) != pdPASS) {
+      Serial.printf("stream workers: only %d of %d could be started\n", i, STREAM_WORKERS);
+      break;
+    }
+  }
   return true;
 }
 

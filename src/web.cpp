@@ -12,6 +12,7 @@
 #include "camera.h"
 #include "config.h"
 #include "portal.h"
+#include "storage.h"
 #include "httputil.h"
 #include "web.h"
 
@@ -301,9 +302,29 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   row("Address", online ? WiFi.localIP().toString() : String("none"));
   row("Signal", online ? String(WiFi.RSSI()) + " dBm" : String("n/a"));
   row("Reconnects", String(reconnectTally));
+  if (sdMounted()) {
+    const uint64_t freeMb = (sdTotalBytes() - sdUsedBytes()) / (1024ULL * 1024ULL);
+    row("SD card", sdCardType() + ", " +
+                       String((uint32_t)(sdTotalBytes() / (1024ULL * 1024ULL))) +
+                       " MB, " + String((uint32_t)freeMb) + " MB free" +
+                       (sdWritable() ? "" : ", NOT WRITABLE"));
+  } else {
+    row("SD card", "not detected");
+  }
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
-  row("Running slot", running ? running->label : "unknown");
+  // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
+  // are two slots and the useful fact is which one is executing.
+  String slot = "unknown";
+  if (running) {
+    const String label = running->label;
+    if (label.startsWith("app") && label.length() == 4) {
+      slot = label.substring(3) + "/1";
+    } else {
+      slot = label;
+    }
+  }
+  row("Running slot", slot);
   row("Setup access point", apWindowOpen()
                                 ? "open, " + String(apWindowSecondsLeft() / 60) +
                                       " min left"
@@ -328,8 +349,32 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   if (configLoad(stored)) {
     row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
   }
-  body += "</table><div class=actions>"
-          "<a class=btn href=\"/restart\">Restart camera</a></div>";
+  body += "</table>";
+
+  if (sdMounted()) {
+    SdEntry entries[20];
+    int total = 0;
+    const int shown = sdListRoot(entries, 20, &total);
+
+    body += "<h2 style=\"margin-top:22px\">Card contents</h2>";
+    if (total == 0) {
+      body += "<p class=sub>Root directory is empty.</p>";
+    } else {
+      body += "<table>";
+      for (int i = 0; i < shown; i++) {
+        const String size = entries[i].isDir
+                                ? String("directory")
+                                : String((uint32_t)(entries[i].size / 1024)) + " KB";
+        body += "<tr><th>" + htmlEscape(entries[i].name) + "</th><td>" + size + "</td></tr>";
+      }
+      body += "</table>";
+      if (total > shown) {
+        body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
+      }
+    }
+  }
+
+  body += "<div class=actions><a class=btn href=\"/restart\">Restart camera</a></div>";
   return sendShell(req, "/status", body);
 }
 
@@ -488,16 +533,27 @@ If it fails, the running firmware is untouched.</p>
 <p id=msg class=sub></p>
 <script>
 const msg = document.getElementById('msg');
-document.getElementById('go').onclick = async () => {
+const fmt = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB'
+                              : (b / 1024).toFixed(0) + ' KB';
+
+document.getElementById('go').onclick = () => {
   const file = document.getElementById('f').files[0];
   if (!file) { msg.textContent = 'Pick a file first.'; return; }
-  msg.textContent = 'Uploading ' + file.size + ' bytes...';
-  try {
-    // Sent as a raw body rather than multipart: parsing multipart on the device
-    // would cost more code than the whole upload path.
-    const r = await fetch('/update', {method: 'POST', body: file});
-    msg.textContent = await r.text();
-  } catch (e) { msg.textContent = 'Upload failed: ' + e; }
+
+  // XHR rather than fetch: fetch cannot report upload progress, and a silent
+  // twenty second transfer is how someone decides it has hung and pulls the
+  // power partway through writing flash.
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update');
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    msg.textContent = 'Uploading ' + fmt(e.loaded) + ' of ' + fmt(e.total) + '  (' + pct + '%)';
+  };
+  xhr.onload = () => { msg.textContent = xhr.responseText || 'Done.'; };
+  xhr.onerror = () => { msg.textContent = 'Upload failed. The running firmware is untouched.'; };
+  msg.textContent = 'Starting ' + fmt(file.size) + ' upload...';
+  xhr.send(file);
 };
 </script>
 )HTML";

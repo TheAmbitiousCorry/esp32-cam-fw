@@ -9,6 +9,7 @@
 #include "config.h"
 #include "portal.h"
 #include "statusled.h"
+#include "storage.h"
 #include "secrets.h"
 #include "web.h"
 
@@ -40,18 +41,6 @@ static bool cameraReady = false;
 static TrialState trial;
 static bool onTrial = false;
 
-// ArduinoOTA has no way out of its wait-for-auth state: it answers an invitation
-// with a challenge and then sits there until another packet arrives. Any stray
-// probe on the network can therefore disable the update path until someone
-// reboots, and the update path is exactly what is needed when something is
-// wrong. Restarting the service on a timer bounds how long that can last.
-//
-// Thirty seconds is affordable because we take mDNS out of ArduinoOTA's hands
-// below, which reduces a restart to rebinding one UDP socket. Left to itself,
-// end() tears down the entire mDNS responder including our own service record,
-// and begin() does not put it back.
-static constexpr uint32_t OTA_REFRESH_MS = 30UL * 1000UL;
-static uint32_t otaRefreshedAt = 0;
 static bool otaInProgress = false;
 
 static constexpr unsigned long RETRY_MIN_MS = 5000;
@@ -175,7 +164,6 @@ static void startOta() {
   });
 
   ArduinoOTA.begin();
-  otaRefreshedAt = millis();
   Serial.printf("OTA ready on %s.local\n", cfg.cameraName.c_str());
 }
 
@@ -378,6 +366,9 @@ void setup() {
   // A camera fault must not take the network down with it. Staying reachable is
   // what makes the difference between diagnosing this over the air and going
   // back to the cable with the SD card out.
+  // Before flashInit: SDMMC claims its pins on mount, and setting up the flash
+  // LED afterwards keeps GPIO4 ours regardless of what the driver touched.
+  sdInit();
   flashInit();
   cameraReady = cameraInit();
   if (!cameraReady) {
@@ -432,14 +423,6 @@ void loop() {
 
   ensureWifi();
   ArduinoOTA.handle();
-
-  // Cheap, and only ever runs when no transfer is underway, so a legitimate
-  // update is never interrupted by it.
-  if (!otaInProgress && millis() - otaRefreshedAt > OTA_REFRESH_MS) {
-    otaRefreshedAt = millis();
-    ArduinoOTA.end();
-    ArduinoOTA.begin();
-  }
 
   static unsigned long lastReport = 0;
   if (millis() - lastReport > 15000) {

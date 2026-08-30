@@ -13,6 +13,7 @@
 #include "clock.h"
 #include "config.h"
 #include "portal.h"
+#include "motion.h"
 #include "recording.h"
 #include "storage.h"
 #include "httputil.h"
@@ -539,6 +540,14 @@ static esp_err_t statusHandler(httpd_req_t *req) {
     row("Recording", recordingDir() + ", " + String(recordingFrames()) + " frames, " +
                          String(recordingFps(), 1) + " fps");
   }
+  {
+    Config c;
+    configLoad(c);
+    row("Motion trigger", c.motionEnabled
+                              ? "on at " + String(c.motionSensitivity) + "%, last frame " +
+                                    String(motionLastChange()) + "%"
+                              : "off");
+  }
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
   // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
@@ -611,6 +620,19 @@ static esp_err_t sendSettings(httpd_req_t *req, const String &notice) {
           "back on.</small>";
   body += "<label>Firmware update password</label><input name=otapw value=\"" +
           htmlEscape(stored.otaPassword) + "\" required>";
+  body += String("<label><input type=checkbox name=moten value=1 style=\"width:auto\"") +
+          (stored.motionEnabled ? " checked" : "") +
+          "> Record automatically when the scene changes</label>";
+  body += "<label>Motion sensitivity</label>"
+          "<input type=number name=motsens min=1 max=100 value=" +
+          String(stored.motionSensitivity) + ">";
+  body += "<small class=sub>Percentage of the scene that must change. Lower "
+          "triggers more easily. The status page shows what the camera is "
+          "currently seeing, which is the way to choose a number.</small>";
+  body += "<label>Recording length, seconds</label>"
+          "<input type=number name=recsec min=2 max=120 value=" +
+          String(stored.recordSeconds) + ">";
+
   body += "<label>Timezone</label>"
           "<select id=tzlist style=\"margin-bottom:6px\">"
           "<option value=''>Choose a zone...</option>"
@@ -911,6 +933,11 @@ static esp_err_t settingsPostHandler(httpd_req_t *req) {
   stored.wifiSsid = ssid;
   stored.apWindow = !formField(body, "apwin").isEmpty();
   stored.timezone = formField(body, "tz");
+  stored.motionEnabled = !formField(body, "moten").isEmpty();
+  const int sens = formField(body, "motsens").toInt();
+  if (sens >= 1 && sens <= 100) stored.motionSensitivity = (uint8_t)sens;
+  const int secs = formField(body, "recsec").toInt();
+  if (secs >= 2 && secs <= 120) stored.recordSeconds = (uint8_t)secs;
   // Blank means unchanged: echoing a stored password back into a form only to
   // have it submitted again is a good way to lose it to a typo.
   if (!wifipass.isEmpty()) stored.wifiPass = wifipass;

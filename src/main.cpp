@@ -7,6 +7,7 @@
 
 #include "camera.h"
 #include "clock.h"
+#include "motion.h"
 #include "config.h"
 #include "portal.h"
 #include "recording.h"
@@ -276,6 +277,40 @@ static void startWifi() {
   WiFi.setSleep(false);
 }
 
+// Checked a couple of times a second rather than per frame. Motion does not
+// happen faster than that, and decoding a frame to compare it is not free.
+static constexpr uint32_t MOTION_INTERVAL_MS = 400;
+
+// After a recording ends, ignore motion for a moment. Without it the movement
+// that ends one recording immediately starts the next.
+static constexpr uint32_t MOTION_COOLDOWN_MS = 4000;
+
+static uint32_t lastMotionCheck = 0;
+static uint32_t motionBlockedUntil = 0;
+
+static void motionTick() {
+  if (!cfg.motionEnabled || !cameraReady || portalMode) return;
+  if (recordingActive()) {
+    // Nothing to decide while already recording, and the recorder owns the
+    // camera. Hold the cooldown open until it finishes.
+    motionBlockedUntil = millis() + MOTION_COOLDOWN_MS;
+    return;
+  }
+  if ((int32_t)(millis() - motionBlockedUntil) < 0) return;
+  if (millis() - lastMotionCheck < MOTION_INTERVAL_MS) return;
+  lastMotionCheck = millis();
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) return;
+  const bool moved = motionCheck(fb);
+  esp_camera_fb_return(fb);
+
+  if (moved) {
+    Serial.printf("motion: %u%% of the scene changed, recording\n", motionLastChange());
+    recordingStart(cfg.recordSeconds);
+  }
+}
+
 // Chunk size is divisible by 3 so only the final chunk carries base64 padding,
 // which keeps the stream concatenable on the receiving end.
 static void dumpBase64(const camera_fb_t *fb) {
@@ -375,6 +410,8 @@ void setup() {
   // failing. It is also the primary function: if only one of the two can come
   // up, it should be the camera.
   cameraReady = cameraInit();
+  motionInit();
+  motionSetSensitivity(cfg.motionSensitivity);
 
   sdInit();
 
@@ -409,6 +446,7 @@ void loop() {
   portalLoop();
   statusLedTick();
   recordingTick();
+  motionTick();
 
   // Serial capture is kept as a fallback for when the network is the thing that
   // is broken, which is exactly when the browser view is no help.

@@ -26,6 +26,13 @@ struct Config {
   // the C library instead of by us.
   String timezone;
 
+  // Motion triggering. Sensitivity is the percentage of the scene that must
+  // change; the right value depends entirely on what the camera is pointed at,
+  // which is why it is stored rather than compiled in.
+  bool motionEnabled = false;
+  uint8_t motionSensitivity = 20;
+  uint8_t recordSeconds = 10;
+
   bool apWindow = true;
   bool configured = false;
 };

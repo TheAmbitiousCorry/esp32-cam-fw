@@ -82,6 +82,9 @@ bool configLoad(Config &out) {
   out.otaPassword = prefs.getString("otapw", "");
   out.otaMd5 = prefs.getString("otamd5", "");
   out.timezone = prefs.getString("tz", "");
+  out.motionEnabled = prefs.getBool("moten", false);
+  out.motionSensitivity = prefs.getUChar("motsens", 20);
+  out.recordSeconds = prefs.getUChar("recsec", 10);
   out.apWindow = prefs.getBool("apwin", true);
   out.configured = prefs.getBool("done", false);
   prefs.end();
@@ -106,6 +109,9 @@ bool configSave(const Config &cfg) {
   prefs.putString("otapw", cfg.otaPassword);
   prefs.putString("otamd5", cfg.otaMd5);
   prefs.putString("tz", cfg.timezone);
+  prefs.putBool("moten", cfg.motionEnabled);
+  prefs.putUChar("motsens", cfg.motionSensitivity);
+  prefs.putUChar("recsec", cfg.recordSeconds);
   prefs.putBool("apwin", cfg.apWindow);
   prefs.putBool("done", true);
   prefs.end();

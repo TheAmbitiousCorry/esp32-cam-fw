@@ -274,6 +274,27 @@ bool sdWriteSmall(const String &path, const String &contents) {
   return n == contents.length();
 }
 
+bool sdAppendSmall(const String &path, const String &contents) {
+  if (!mounted || !sdPathIsSafe(path)) return false;
+  File f = SD_MMC.open(path, FILE_APPEND);
+  if (!f) return false;
+  const size_t n = f.print(contents);
+  f.close();
+  return n == contents.length();
+}
+
+String sdReadTail(const String &path, size_t maxLen) {
+  if (!mounted || !sdPathIsSafe(path)) return "";
+  File f = SD_MMC.open(path, FILE_READ);
+  if (!f) return "";
+  const size_t size = f.size();
+  if (size > maxLen) f.seek(size - maxLen);
+  String out;
+  while (f.available()) out += (char)f.read();
+  f.close();
+  return out;
+}
+
 size_t sdFileSize(const String &path) {
   if (!mounted || !sdPathIsSafe(path)) return 0;
   File f = SD_MMC.open(path, FILE_READ);
@@ -302,11 +323,18 @@ bool sdIndexOpen(const String &path, void **handle) { return sdOpenRead(path, ha
 
 bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs) {
   File *f = (File *)handle;
-  if (!f || !*f || !f->available()) return false;
-  const String line = f->readStringUntil('\n');
-  if (line.length() < 3) return false;
-  return sscanf(line.c_str(), "%lu %lu %lu", (unsigned long *)offset,
-                (unsigned long *)length, (unsigned long *)atMs) == 3;
+  if (!f || !*f) return false;
+  // A line that does not parse is skipped rather than taken for the end of the
+  // file. An append that lost power part way through one line would otherwise
+  // hide every line written after it.
+  while (f->available()) {
+    const String line = f->readStringUntil('\n');
+    if (sscanf(line.c_str(), "%lu %lu %lu", (unsigned long *)offset,
+               (unsigned long *)length, (unsigned long *)atMs) == 3) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void sdIndexClose(void *handle) { sdCloseRead(handle); }

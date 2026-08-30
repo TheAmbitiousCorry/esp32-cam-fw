@@ -65,6 +65,15 @@ size_t sdFileSize(const String &path);
 // might be large belongs in sdOpenRead and chunks.
 String sdReadSmall(const String &path, size_t maxLen = 256);
 bool sdWriteSmall(const String &path, const String &contents);
+
+// Adds a line to the end of a file, creating it if it is not there. The per-day
+// summary is append-only on purpose: rewriting it after every recording would
+// cost more than the reads it saves.
+bool sdAppendSmall(const String &path, const String &contents);
+
+// Reads the last bytes of a file. Recovers how long a recording ran from the end
+// of its index without reading the whole thing.
+String sdReadTail(const String &path, size_t maxLen);
 size_t sdReadNext(void *handle, uint8_t *out, size_t len);
 
 // Reads one line of an index file. Returns false at end of file.

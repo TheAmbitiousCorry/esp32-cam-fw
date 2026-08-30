@@ -1421,7 +1421,21 @@ static esp_err_t downloadHandler(httpd_req_t *req) {
   // The name after the last slash, so a browser saves it as something meaningful
   // rather than as the query string.
   const int cut = path.lastIndexOf('/');
-  const String name = cut >= 0 ? path.substring(cut + 1) : path;
+  String name = cut >= 0 ? path.substring(cut + 1) : path;
+
+  // Every recording holds a file of the same name, so downloading a morning's
+  // footage would otherwise land as video.mjpeg, video(1).mjpeg, and so on, with
+  // nothing to say which was which. The directories above it are the date and
+  // the time, which is exactly the missing information.
+  if (name == "video.mjpeg" && cut > 0) {
+    const String dir = path.substring(0, cut);
+    const int up = dir.lastIndexOf('/');
+    if (up > 0) {
+      const String day = dir.substring(0, up);
+      name = day.substring(day.lastIndexOf('/') + 1) + "-" + dir.substring(up + 1) +
+             ".mjpeg";
+    }
+  }
   const String disp = "attachment; filename=\"" + name + "\"";
 
   httpd_resp_set_type(req, "application/octet-stream");
@@ -1491,6 +1505,80 @@ static String queryParam(httpd_req_t *req, const char *key, const String &fallba
   return urlDecode(String(value));
 }
 
+// How many entries one page of the file listing holds. Shared, because the
+// metadata loader fills one array per row and must not silently stop short of
+// the page it was given.
+static constexpr int LIST_PAGE = 50;
+
+// What a listing needs to say about a recording beyond its name.
+struct RecMeta {
+  uint32_t durMs;
+  uint32_t bytes;
+  bool known;
+};
+
+// Fills in the length and size of every recording on one page of a day.
+//
+// The day summary answers the whole page in one read. Anything missing from it
+// is a recording that never got to write its line, because it predates the
+// summary or because the power went before it stopped; that falls back to the
+// tail of its own index, which is written per frame and so survives both. The
+// fallback then appends what it found, so a given recording is only ever slow
+// once.
+static void loadDayMeta(const String &dayPath, const SdEntry *entries, int count,
+                        RecMeta *out) {
+  for (int i = 0; i < count; i++) out[i] = RecMeta{0, 0, false};
+
+  // Recordings are named for the time they started, so an all-digit name is what
+  // separates them from the day directories they sit beside in /rec.
+  bool candidate[LIST_PAGE] = {};
+  for (int i = 0; i < count && i < LIST_PAGE; i++) {
+    if (!entries[i].isDir || entries[i].name.isEmpty()) continue;
+    candidate[i] = true;
+    for (unsigned c = 0; c < entries[i].name.length(); c++) {
+      if (!isdigit(entries[i].name[c])) { candidate[i] = false; break; }
+    }
+  }
+
+  // Recording names are six digits, so the summary parses as three numbers and
+  // the index reader already knows how to do that.
+  void *fh = nullptr;
+  if (sdIndexOpen(dayPath + "/.day", &fh)) {
+    uint32_t at = 0, durMs = 0, bytes = 0;
+    while (sdIndexNext(fh, &at, &durMs, &bytes)) {
+      for (int i = 0; i < count; i++) {
+        if (!out[i].known && candidate[i] &&
+            (uint32_t)entries[i].name.toInt() == at) {
+          out[i] = RecMeta{durMs, bytes, true};
+          break;
+        }
+      }
+    }
+    sdIndexClose(fh);
+  }
+
+  for (int i = 0; i < count; i++) {
+    if (out[i].known || !candidate[i]) continue;
+
+    // The last index line carries the last frame's offset, length and time,
+    // which is the whole answer: the recording ran that long and is that big.
+    String tail = sdReadTail(entries[i].path + "/index.txt", 96);
+    while (tail.endsWith("\n") || tail.endsWith("\r")) tail.remove(tail.length() - 1);
+    if (tail.isEmpty()) continue;
+    const int nl = tail.lastIndexOf('\n');
+    const String last = nl >= 0 ? tail.substring(nl + 1) : tail;
+
+    unsigned long off = 0, len = 0, ms = 0;
+    if (sscanf(last.c_str(), "%lu %lu %lu", &off, &len, &ms) != 3) continue;
+
+    out[i] = RecMeta{(uint32_t)ms, (uint32_t)(off + len), true};
+    char line[80];
+    snprintf(line, sizeof(line), "%s %lu %lu\n", entries[i].name.c_str(), ms,
+             off + len);
+    sdAppendSmall(dayPath + "/.day", line);
+  }
+}
+
 static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   String path = queryParam(req, "path", "/");
   if (!sdPathIsSafe(path)) path = "/";
@@ -1530,7 +1618,7 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
             "if (d) location = '/files?path=/rec/' + d; };</script>";
   }
 
-  static constexpr int PAGE = 50;
+  static constexpr int PAGE = LIST_PAGE;
   SdEntry entries[PAGE];
   int total = 0;
   const int shown = sdList(path, entries, PAGE, &total, startAt);
@@ -1539,6 +1627,14 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     body += "<p class=sub>Nothing here.</p>";
     return sendShell(req, "/files", body);
   }
+
+  // One read for the page instead of two file opens per row. At this card's
+  // 150ms an open, that is what made listing a day take twelve seconds.
+  // A recording normally sits in a day directory, but one made before the clock
+  // reached an NTP server is numbered and sits in /rec beside the days.
+  const bool holdsRecordings = inDay || atRecRoot;
+  RecMeta metas[PAGE];
+  if (holdsRecordings) loadDayMeta(path, entries, shown, metas);
 
   body += "<form method=post action=/files><table>";
   for (int i = 0; i < shown; i++) {
@@ -1551,34 +1647,39 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
               label.substring(4, 6);
     }
 
-    if (entries[i].isDir && sdExists(entries[i].path + "/video.mjpeg")) {
-      // "<frames> <milliseconds> <bytes>", written when the recording stopped.
-      const String meta = sdReadSmall(entries[i].path + "/meta.txt", 96);
-      if (meta.length() > 2) {
-        const int sp1 = meta.indexOf(' ');
-        const int sp2 = meta.indexOf(' ', sp1 + 1);
-        const long durMs = meta.substring(sp1 + 1, sp2).toInt();
-        const long kb = meta.substring(sp2 + 1).toInt() / 1024;
+    if (holdsRecordings && metas[i].known) {
+      const long durMs = metas[i].durMs;
 
-        String ends;
-        // Start comes from the directory name; the end is start plus duration.
-        if (entries[i].name.length() == 6 && durMs > 0) {
-          const int h = entries[i].name.substring(0, 2).toInt();
-          const int m = entries[i].name.substring(2, 4).toInt();
-          const int sec = entries[i].name.substring(4, 6).toInt();
-          long endSec = h * 3600L + m * 60L + sec + (durMs + 500) / 1000;
-          endSec %= 86400L;
-          char buf[16];
-          snprintf(buf, sizeof(buf), "%02ld:%02ld:%02ld", endSec / 3600,
-                   (endSec % 3600) / 60, endSec % 60);
-          ends = String(" to ") + buf;
-        }
-
-        action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends +
-                 ", " + String(kb) + " KB</span> ";
+      String ends;
+      // Start comes from the directory name; the end is start plus duration.
+      if (entries[i].name.length() == 6 && durMs > 0) {
+        const int h = entries[i].name.substring(0, 2).toInt();
+        const int m = entries[i].name.substring(2, 4).toInt();
+        const int sec = entries[i].name.substring(4, 6).toInt();
+        long endSec = h * 3600L + m * 60L + sec + (durMs + 500) / 1000;
+        endSec %= 86400L;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%02ld:%02ld:%02ld", endSec / 3600,
+                 (endSec % 3600) / 60, endSec % 60);
+        ends = String(" to ") + buf;
       }
-      action += "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
-                htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
+
+      action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends +
+               ", " + String(metas[i].bytes / 1024) + " KB</span> ";
+      action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Play this "
+                "recording in the browser\" href=\"/play?dir=" +
+                htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a> ";
+      // The video is inside the directory, so without this the only way to keep
+      // a recording was to open it and find the file by hand.
+      action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download the "
+                "video as an MJPEG file\" href=\"/download?path=" +
+                htmlEscape(entries[i].path) + "/video.mjpeg\">" + icon("down") +
+                "</a>";
+    } else if (inDay && entries[i].isDir) {
+      // Only inside a day: a directory in /rec is usually a day, not a recording.
+      // A directory in a day with no readable index is a recording that was cut
+      // off before it wrote a single frame. Saying so beats an empty cell.
+      action = "<span class=sub>no frames</span>";
     }
 
     String cell = icon(entries[i].isDir ? "folder" : "image") + htmlEscape(label);

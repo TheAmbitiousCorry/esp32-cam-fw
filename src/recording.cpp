@@ -253,16 +253,22 @@ void recordingStop() {
   active = false;
   if (videoFile) videoFile.close();
   if (indexFile) indexFile.close();
-  const float seconds = (millis() - startedAt) / 1000.0f;
+  const uint32_t durMs = millis() - startedAt;
 
-  // A summary file, so listing a day does not mean opening and parsing an index
-  // for every recording in it.
-  char meta[96];
-  snprintf(meta, sizeof(meta), "%lu %lu %lu\n", (unsigned long)frames,
-           (unsigned long)(millis() - startedAt), (unsigned long)bytes);
-  sdWriteSmall(dir + "/meta.txt", meta);
+  // One line per recording, in one file per day. Listing a day then costs a
+  // single read instead of a file open for every recording in it, and this card
+  // charges about 150ms an open: fifty recordings is the difference between
+  // twelve seconds and under one. Hidden, because it is bookkeeping, not footage.
+  const int cut = dir.lastIndexOf('/');
+  if (cut > 0) {
+    char line[80];
+    snprintf(line, sizeof(line), "%s %lu %lu\n", dir.c_str() + cut + 1,
+             (unsigned long)durMs, (unsigned long)bytes);
+    sdAppendSmall(dir.substring(0, cut) + "/.day", line);
+  }
   Serial.printf("recording done: %lu frames, %lu KB, %.1f fps over %.1fs\n",
-                (unsigned long)frames, (unsigned long)(bytes / 1024), recordingFps(), seconds);
+                (unsigned long)frames, (unsigned long)(bytes / 1024), recordingFps(),
+                durMs / 1000.0f);
 }
 
 void recordingTick() {

@@ -277,16 +277,25 @@ static void startWifi() {
   WiFi.setSleep(false);
 }
 
-// Checked a couple of times a second rather than per frame. Motion does not
-// happen faster than that, and decoding a frame to compare it is not free.
-static constexpr uint32_t MOTION_INTERVAL_MS = 400;
+// Grabbing a frame costs about 18ms; decoding one to compare it costs far more.
+// So the two run at different rates: history is captured often because it is
+// cheap and choppy history is the thing that makes a pre-roll useless, while
+// detection runs rarely because the buffer already covers the approach.
+//
+// The cost of slower detection is that movement must persist about a second to
+// trigger. With five seconds of history behind the trigger, that is paid for.
+static constexpr uint32_t PREROLL_INTERVAL_MS = 200;   // 5 fps of history
+static constexpr uint32_t MOTION_INTERVAL_MS = 800;    // decode rate
 
 // After a recording ends, ignore motion for a moment. Without it the movement
 // that ends one recording immediately starts the next.
 static constexpr uint32_t MOTION_COOLDOWN_MS = 4000;
 
 static uint32_t lastMotionCheck = 0;
+static uint32_t lastPrerollPush = 0;
 static uint32_t motionBlockedUntil = 0;
+static uint32_t lastObservedAt = 0;
+static bool observedMoved = false;
 
 // A schedule that has never seen a real clock would run against 1970, so an
 // unsynced clock means the schedule does not apply rather than blocks recording.
@@ -318,6 +327,21 @@ static bool stillMoving(camera_fb_t *fb) {
 
 bool motionArmed() { return cfg.motionEnabled && withinSchedule(); }
 
+void motionObserve(camera_fb_t *fb) {
+  if (!fb || !motionArmed() || recordingActive()) return;
+  if ((int32_t)(millis() - motionBlockedUntil) < 0) return;
+
+  if (cfg.prerollSeconds > 0 && millis() - lastPrerollPush >= PREROLL_INTERVAL_MS) {
+    lastPrerollPush = millis();
+    prerollPush(fb);
+  }
+  if (millis() - lastMotionCheck >= MOTION_INTERVAL_MS) {
+    lastMotionCheck = millis();
+    if (motionCheck(fb)) observedMoved = true;
+  }
+  lastObservedAt = millis();
+}
+
 static void motionTick() {
   if (!cfg.motionEnabled || !cameraReady || portalMode) return;
   if (!withinSchedule()) return;
@@ -328,18 +352,34 @@ static void motionTick() {
     return;
   }
   if ((int32_t)(millis() - motionBlockedUntil) < 0) return;
-  if (millis() - lastMotionCheck < MOTION_INTERVAL_MS) return;
-  lastMotionCheck = millis();
 
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) return;
-  const bool moved = motionCheck(fb);
+  // A viewer feeds motionObserve() with the frames it is already fetching, so
+  // grabbing here as well would put a second consumer on the camera. Only take
+  // over when nobody has offered a frame recently.
+  bool moved = observedMoved;
+  observedMoved = false;
 
-  // Every frame the detector sees goes into the history, whether or not it
-  // triggered. That history is the whole point: by the time something has
-  // moved enough to trigger, the interesting part has already happened.
-  if (cfg.prerollSeconds > 0) prerollPush(fb);
-  esp_camera_fb_return(fb);
+  if (millis() - lastObservedAt < 1000) {
+    if (!moved) return;
+  } else {
+    const bool wantPreroll =
+        cfg.prerollSeconds > 0 && millis() - lastPrerollPush >= PREROLL_INTERVAL_MS;
+    const bool wantDetect = millis() - lastMotionCheck >= MOTION_INTERVAL_MS;
+    if (!wantPreroll && !wantDetect) return;
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) return;
+
+    if (wantPreroll) {
+      lastPrerollPush = millis();
+      prerollPush(fb);
+    }
+    if (wantDetect) {
+      lastMotionCheck = millis();
+      if (motionCheck(fb)) moved = true;
+    }
+    esp_camera_fb_return(fb);
+  }
 
   if (moved) {
     Serial.printf("motion: %u%% of the scene changed, recording\n", motionLastChange());

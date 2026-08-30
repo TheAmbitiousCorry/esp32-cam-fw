@@ -30,3 +30,9 @@ uint8_t motionLastChange();
 
 // Whether motion recording is enabled and inside its schedule right now.
 bool motionArmed();
+
+// Offered by whoever currently holds the camera. History and detection then ride
+// on frames someone else already grabbed, instead of grabbing their own and
+// competing: two consumers of this camera do not share fairly, and adding a
+// second grabber at 5 fps took a live stream from 17 fps to 0.5.
+void motionObserve(camera_fb_t *fb);

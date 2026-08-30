@@ -54,11 +54,11 @@ static bool (*activityCheck)(camera_fb_t *) = nullptr;
 static uint32_t activityQuietMs = 0;
 static uint32_t lastActivityCheck = 0;
 
-// Decoding a frame to compare it costs real time. Asking once per recorded frame
-// meant 25 JPEG decodes a second, which starved the web server to the point
-// where a page took twenty seconds. Movement does not need checking faster than
-// it happens.
-static constexpr uint32_t ACTIVITY_INTERVAL_MS = 400;
+// While recording, this only decides when to stop. With several seconds of
+// required stillness, checking once a second moves the end by under a second and
+// costs a fifth of the decodes. Recording is the most loaded moment the firmware
+// has, so it is the right place to be frugal.
+static constexpr uint32_t ACTIVITY_INTERVAL_MS = 1000;
 
 // A recording that extends while anything moves has no natural end. Traffic past
 // a window, or a sensitivity set too low, would otherwise record until the card

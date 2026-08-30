@@ -672,6 +672,10 @@ static esp_err_t streamHandler(httpd_req_t *req) {
       break;
     }
 
+    // Hand the frame to history and detection before sending it. They then need
+    // no camera access of their own for as long as anyone is watching.
+    motionObserve(fb);
+
     const size_t hlen = snprintf(partHeader, sizeof(partHeader), STREAM_PART, fb->len);
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
     if (res == ESP_OK) res = httpd_resp_send_chunk(req, partHeader, hlen);

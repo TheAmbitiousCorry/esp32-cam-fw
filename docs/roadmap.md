@@ -9,14 +9,19 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-_Empty. The next item comes from Next._
-
-## Next
+- **The card can be cleared without taking it out**: browse what is on the card
+  and delete it from the web interface. Why now: the card arrived full of
+  H2testw artifacts, there is no card reader to hand, and an inserted card blocks
+  USB flashing, so firmware is the only way to free the space that everything
+  below depends on. The same page becomes the recordings browser.
+  Domains: storage, web. Appetite: small.
 
 - **Footage survives on the SD card and can be played back**: stated goal, and the
   half of "security camera" that outlives a power cut. Why now: motion detection is
   worth nothing until there is somewhere for a trigger to write to, so storage
   precedes it in dependency order. Domains: storage, camera. Appetite: large.
+
+## Next
 
 - **Recording starts without a human asking**: a camera that records on command is
   not a security camera. Covers the trigger source as an open question: frame
@@ -28,9 +33,10 @@ _Empty. The next item comes from Next._
   layout, which is expensive to migrate once there is footage on the card.
   Domains: storage, network. Appetite: small.
 
-- **A full SD card does not stop the camera recording**: the failure is silent and
-  arrives exactly when the camera is least supervised. Why now: it is cheap to
-  decide the retention rule early and awkward to bolt on later. Domains: storage.
+- **A full card ages out old footage on its own**: manual deletion covers the
+  card being full today; it does not cover the camera filling it again unattended
+  at 3am. Why now: the retention rule is cheap to decide while the file layout is
+  still being designed and awkward to bolt on afterwards. Domains: storage.
   Appetite: small.
 
 - **Camera settings are tunable from the settings page**: motion sensitivity,

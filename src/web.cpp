@@ -63,6 +63,10 @@ static String icon(const char *name) {
     d = "<path d='M8 13V3M4 7l4-4 4 4'/>";
   else if (!strcmp(name, "down"))
     d = "<path d='M8 3v10M4 9l4 4 4-4'/>";
+  else if (!strcmp(name, "disk"))
+    d = "<ellipse cx='8' cy='4' rx='5.5' ry='2'/>"
+        "<path d='M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4'/><path d='M2.5 8c0 "
+        "1.1 2.5 2 5.5 2s5.5-.9 5.5-2'/>";
   else if (!strcmp(name, "zoom"))
     d = "<circle cx='7' cy='7' r='4.5'/><path d='M10.5 10.5L14 14M5 7h4M7 5v4'/>";
   else
@@ -71,6 +75,21 @@ static String icon(const char *name) {
   return String("<svg viewBox='0 0 16 16' width='15' height='15' fill='none' "
                 "stroke='currentColor' stroke-width='1.4' stroke-linecap='round' "
                 "stroke-linejoin='round' aria-hidden='true'>") + d + "</svg>";
+}
+
+// Sizes here run from a few hundred bytes of index to gigabytes of footage, so
+// any single unit is unreadable at one end or the other. One decimal below a
+// hundred and none above it, which keeps the column about the same width
+// whichever unit a row lands in.
+static String formatSize(uint64_t bytes) {
+  static const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+  int unit = 0;
+  double value = (double)bytes;
+  while (value >= 1024.0 && unit < 4) {
+    value /= 1024.0;
+    unit++;
+  }
+  return String(value, (unit == 0 || value >= 100.0) ? 0 : 1) + " " + units[unit];
 }
 
 static String cameraName = "camera";
@@ -1230,10 +1249,8 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   row("Signal", online ? String(WiFi.RSSI()) + " dBm" : String("n/a"));
   row("Reconnects", String(reconnectTally));
   if (sdMounted()) {
-    const uint64_t freeMb = (sdTotalBytes() - sdUsedBytes()) / (1024ULL * 1024ULL);
-    row("SD card", sdCardType() + ", " +
-                       String((uint32_t)(sdTotalBytes() / (1024ULL * 1024ULL))) +
-                       " MB, " + String((uint32_t)freeMb) + " MB free" +
+    row("SD card", sdCardType() + ", " + formatSize(sdTotalBytes()) + ", " +
+                       formatSize(sdTotalBytes() - sdUsedBytes()) + " free" +
                        (sdWritable() ? "" : ", NOT WRITABLE"));
   } else {
     row("SD card", "not detected");
@@ -1664,8 +1681,9 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
         ends = String(" to ") + buf;
       }
 
-      action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends +
-               ", " + String(metas[i].bytes / 1024) + " KB</span> ";
+      action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends + "</span> " +
+               "<span class=sub>" + icon("disk") + formatSize(metas[i].bytes) +
+               "</span> ";
       action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Play this "
                 "recording in the browser\" href=\"/play?dir=" +
                 htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a> ";
@@ -1691,7 +1709,8 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     if (entries[i].isDir) {
       size = action;
     } else {
-      size = String((uint32_t)(entries[i].size / 1024)) + " KB "
+      size = "<span class=sub>" + icon("disk") + formatSize(entries[i].size) +
+             "</span> "
              "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download this "
              "file\" href=\"/download?path=" + htmlEscape(entries[i].path) +
              "\">" + icon("down") + "</a>";
@@ -1991,8 +2010,13 @@ If it fails, the running firmware is untouched.</p>
 <p id=msg class=sub></p>
 <script>
 const msg = document.getElementById('msg');
-const fmt = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB'
-                              : (b / 1024).toFixed(0) + ' KB';
+// Matches formatSize on the device: one decimal below a hundred, none above.
+const fmt = b => {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let u = 0;
+  while (b >= 1024 && u < 3) { b /= 1024; u++; }
+  return b.toFixed(u === 0 || b >= 100 ? 0 : 1) + ' ' + units[u];
+};
 
 document.getElementById('go').onclick = () => {
   const file = document.getElementById('f').files[0];

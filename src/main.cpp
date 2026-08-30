@@ -180,6 +180,13 @@ static void ensureWifi() {
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
       if (MDNS.begin(cfg.cameraName.c_str())) {
         MDNS.addService("http", "tcp", 80);
+        // Say what this is. Every web server on the network advertises
+        // _http._tcp, so an aggregator browsing for cameras finds routers,
+        // printers and NAS boxes and cannot tell them apart. One text record
+        // turns "something answers HTTP here" into "this is a camera", which is
+        // the difference between a list worth offering and a list of noise.
+        MDNS.addServiceTxt("http", "tcp", "argus", "cam");
+        MDNS.addServiceTxt("http", "tcp", "fw", FIRMWARE_VERSION);
         MDNS.enableArduino(3232, true);  // ArduinoOTA no longer does this itself
       }
     } else if (offlineSince != 0) {
@@ -194,6 +201,8 @@ static void ensureWifi() {
       MDNS.end();
       if (MDNS.begin(cfg.cameraName.c_str())) {
         MDNS.addService("http", "tcp", 80);
+        MDNS.addServiceTxt("http", "tcp", "argus", "cam");
+        MDNS.addServiceTxt("http", "tcp", "fw", FIRMWARE_VERSION);
         MDNS.enableArduino(3232, true);
       }
     }

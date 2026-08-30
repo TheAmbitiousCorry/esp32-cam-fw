@@ -44,7 +44,11 @@ static httpd_handle_t streamServer = nullptr;
 
 static const char SHARED_CSS[] =
     "*{box-sizing:border-box}"
-    "body{margin:0;background:#111;color:#eee;font:15px system-ui,sans-serif}"
+    // color-scheme tells the browser to render native controls dark, which is
+    // what makes a select's arrow and its option list match rather than
+    // appearing as a white box on a dark page.
+    "body{margin:0;background:#111;color:#eee;font:15px system-ui,sans-serif;"
+    "color-scheme:dark}"
     ".app{display:flex;min-height:100vh}"
     "aside{width:180px;flex:0 0 180px;background:#181818;border-right:1px solid #262626;"
     "padding:18px 0;display:flex;flex-direction:column;gap:2px}"
@@ -70,8 +74,17 @@ static const char SHARED_CSS[] =
     "table{border-collapse:collapse;font-size:14px}"
     "th{text-align:left;color:#999;font-weight:400;padding:6px 22px 6px 0;white-space:nowrap}"
     "td{padding:6px 0;font-variant-numeric:tabular-nums}"
-    "input{width:100%;padding:9px;border-radius:5px;border:1px solid #444;"
-    "background:#1c1c1c;color:#eee;font-size:15px}"
+    "input,select{width:100%;padding:9px;border-radius:5px;border:1px solid #444;"
+    "background:#1c1c1c;color:#eee;font-size:15px;font-family:inherit}"
+    "select{appearance:none;-webkit-appearance:none;padding-right:32px;"
+    // A background-drawn chevron rather than an image: no asset to serve, and it
+    // recolours with the rest of the theme.
+    "background-image:linear-gradient(45deg,transparent 50%,#888 50%),"
+    "linear-gradient(135deg,#888 50%,transparent 50%);"
+    "background-position:calc(100% - 17px) 52%,calc(100% - 12px) 52%;"
+    "background-size:5px 5px,5px 5px;background-repeat:no-repeat}"
+    "select:focus,input:focus{outline:none;border-color:#2a7}"
+    "option{background:#1c1c1c;color:#eee}"
     "label{display:block;margin:14px 0 4px;font-size:13px;color:#bbb}"
     ".card{max-width:320px;margin:12vh auto;padding:0 20px}"
     "@media(max-width:640px){.app{flex-direction:column}"

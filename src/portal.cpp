@@ -30,12 +30,16 @@ static const IPAddress AP_NETMASK(255, 255, 255, 0);
 
 static const char SETUP_CSS[] =
     "body{margin:0;background:#111;color:#eee;font:15px system-ui,sans-serif;"
+    "color-scheme:dark;"
     "display:flex;justify-content:center;padding:24px}"
     "form{width:100%;max-width:380px}h1{font-size:20px;margin:0 0 4px}"
     "p.sub{color:#999;margin:0 0 20px;font-size:13px}"
     "label{display:block;margin:14px 0 4px;font-size:13px;color:#bbb}"
     "input,select{width:100%;box-sizing:border-box;padding:9px;border-radius:5px;"
-    "border:1px solid #444;background:#1c1c1c;color:#eee;font-size:15px}"
+    "border:1px solid #444;background:#1c1c1c;color:#eee;font-size:15px;"
+    "font-family:inherit}"
+    "select:focus,input:focus{outline:none;border-color:#2a7}"
+    "option{background:#1c1c1c;color:#eee}"
     "button{width:100%;margin-top:22px;padding:11px;border:0;border-radius:5px;"
     "background:#2a7;color:#04140d;font-size:15px;font-weight:600}"
     "small{color:#888;display:block;margin-top:6px;font-size:12px}";

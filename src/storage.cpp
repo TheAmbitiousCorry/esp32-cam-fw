@@ -51,7 +51,12 @@ bool sdInit() {
   // formatting a card someone just plugged in is not a decision firmware should
   // make on its own.
   if (!SD_MMC.begin(SD_MOUNT, true)) {
-    Serial.println("SD: no card, or it could not be mounted");
+    // Two different problems wear the same failure here, and the second one is
+    // the common one: cards larger than 32GB ship formatted exFAT, which this
+    // driver cannot read at all. Naming it beats leaving someone to conclude
+    // their card or their slot is broken.
+    Serial.println("SD: no card, or a filesystem this cannot read. Cards over "
+                   "32GB ship as exFAT; reformat as FAT32.");
     mounted = false;
     return false;
   }

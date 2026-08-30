@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "esp_camera.h"
 
 // Everything the camera needs to come up on its own, held in NVS rather than
 // compiled in, so the device can be moved or handed on without a toolchain.
@@ -44,7 +45,13 @@ struct Config {
   // Together they decide how much card an hour costs and whether a face is
   // recognisable. The numeric values of framesize_t shift between SDK versions,
   // so the default is taken from the symbol rather than written as a number.
-  uint8_t frameSize = 0;  // 0 means "unset", replaced on load
+  // Never zero. Zero is a valid framesize to the driver, the 96x96 one, and the
+  // settings page has never offered it. It got here as a struct default meaning
+  // "unset", which the first save then wrote to flash as a real value, and a
+  // camera that loaded it reinitialised into a state where no frame ever
+  // arrived again. A fresh camera is the only one that hits it, which is the
+  // worst possible camera to break.
+  uint8_t frameSize = (uint8_t)FRAMESIZE_SVGA;
   uint8_t jpegQuality = 12;
 
   // Live-adjustable image controls. Defaults are the sensor's own, so an

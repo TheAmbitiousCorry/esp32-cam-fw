@@ -1281,7 +1281,11 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   auto row = [&body](const char *k, const String &v) {
     body += "<tr><th>" + String(k) + "</th><td>" + htmlEscape(v) + "</td></tr>";
   };
-  row("Camera sensor", cameraAvailable ? "detected" : "NOT DETECTED");
+  // Asked of the driver now, not remembered from boot. A frame size change
+  // rebuilds the camera and can fail, and reporting the boot-time answer after
+  // that is how a camera that had stopped delivering frames went on calling
+  // itself detected.
+  row("Camera sensor", cameraIsReady() ? "detected" : "NOT DETECTED");
   row("Time", clockNow());
   row("Uptime", humanUptime());
   const bool online = WiFi.status() == WL_CONNECTED;
@@ -1296,7 +1300,8 @@ static esp_err_t statusHandler(httpd_req_t *req) {
                        formatSize(sdTotalBytes() - sdUsedBytes()) + " free" +
                        (sdWritable() ? "" : ", NOT WRITABLE"));
   } else {
-    row("SD card", "not detected");
+    row("SD card",
+        "not detected, or formatted exFAT. Cards over 32GB need FAT32.");
   }
   if (recordingActive()) {
     row("Recording", recordingDir() + ", " + String(recordingFrames()) + " frames, " +
@@ -2301,8 +2306,12 @@ static esp_err_t recordingsPostHandler(httpd_req_t *req) {
   }
   stored.scheduleDays = days;
 
+  // Bounded by what the list above actually offers rather than by what the enum
+  // allows, so nothing can store a size the camera was never meant to run at.
   const int fsize = formField(body, "fsize").toInt();
-  if (fsize >= 0 && fsize <= (int)FRAMESIZE_UXGA) stored.frameSize = (uint8_t)fsize;
+  if (fsize >= (int)FRAMESIZE_QVGA && fsize <= (int)FRAMESIZE_UXGA) {
+    stored.frameSize = (uint8_t)fsize;
+  }
   const int jq = formField(body, "jq").toInt();
   if (jq >= 10 && jq <= 63) stored.jpegQuality = (uint8_t)jq;
 

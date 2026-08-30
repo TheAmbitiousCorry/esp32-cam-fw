@@ -93,6 +93,9 @@ bool configLoad(Config &out) {
   out.prerollSeconds = prefs.getUChar("presec", 5);
   out.quietSeconds = prefs.getUChar("quietsec", 5);
   out.frameSize = prefs.getUChar("fsize", (uint8_t)FRAMESIZE_SVGA);
+  // Heals a camera already carrying the bad value, since the default above only
+  // applies when the key was never written and the first save always writes it.
+  if (out.frameSize < (uint8_t)FRAMESIZE_QVGA) out.frameSize = (uint8_t)FRAMESIZE_SVGA;
   out.jpegQuality = prefs.getUChar("jq", 12);
   out.autoImage = prefs.getBool("auto", true);
   out.aeLevel = (int8_t)prefs.getChar("ael", 0);

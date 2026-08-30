@@ -33,6 +33,23 @@ struct Config {
   uint8_t motionSensitivity = 20;
   uint8_t recordSeconds = 10;
 
+  // Free space to protect, in MB. When a recording would take the card below
+  // this, the oldest recordings are removed first. Zero disables it.
+  // Frame size is a framesize_t; quality runs 10 (best) to 63 (worst). Together
+  // they decide how much card an hour costs and whether a face is recognisable.
+  uint8_t frameSize = 8;  // FRAMESIZE_SVGA
+  uint8_t jpegQuality = 12;
+
+  uint16_t keepFreeMb = 512;
+
+  // Motion schedule. Hours are local, and a start later than the end means the
+  // window crosses midnight, which is the case people actually want. Days is a
+  // bitmask with Sunday as bit 0; 0x7F is every day.
+  bool scheduleEnabled = false;
+  uint8_t scheduleFromHour = 22;
+  uint8_t scheduleToHour = 6;
+  uint8_t scheduleDays = 0x7F;
+
   bool apWindow = true;
   bool configured = false;
 };

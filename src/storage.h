@@ -43,6 +43,14 @@ int sdListRoot(SdEntry *out, int max, int *totalFound);
 // walked rather than truncated.
 int sdList(const String &path, SdEntry *out, int max, int *totalFound, int startAt = 0);
 bool sdMkdir(const String &path);
+
+// Deletes oldest-first until the card has at least keepFreeMb free, and returns
+// how many recordings were removed.
+//
+// Oldest is decided by name, which works because recordings are stored as
+// /rec/YYYY-MM-DD/HHMMSS and those sort chronologically as text. Reading
+// timestamps off the filesystem would be slower and no more correct.
+int sdAgeOut(uint32_t keepFreeMb);
 bool sdPathIsSafe(const String &path);
 bool sdExists(const String &path);
 

@@ -251,3 +251,58 @@ bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atM
 }
 
 void sdIndexClose(void *handle) { sdCloseRead(handle); }
+
+// Finds the alphabetically first entry, which for date-named directories is the
+// oldest. Scanning twice, once for days and once within a day, avoids holding a
+// whole card's worth of names in memory.
+static bool firstEntry(const String &path, String *outPath, String *outName) {
+  SdEntry entries[32];
+  int total = 0;
+  String best, bestName;
+  for (int start = 0;; start += 32) {
+    const int n = sdList(path, entries, 32, &total, start);
+    if (n == 0) break;
+    for (int i = 0; i < n; i++) {
+      if (bestName.isEmpty() || entries[i].name < bestName) {
+        bestName = entries[i].name;
+        best = entries[i].path;
+      }
+    }
+    if (start + n >= total) break;
+  }
+  if (best.isEmpty()) return false;
+  *outPath = best;
+  *outName = bestName;
+  return true;
+}
+
+int sdAgeOut(uint32_t keepFreeMb) {
+  if (!mounted || keepFreeMb == 0) return 0;
+
+  int removed = 0;
+  // Bounded so a wrong threshold cannot empty the card in one pass. Ageing runs
+  // before every recording, so a genuine backlog clears over several of them.
+  for (int guard = 0; guard < 20; guard++) {
+    refreshSpace(true);
+    const uint64_t freeMb = (cachedTotal - cachedUsed) / (1024ULL * 1024ULL);
+    if (freeMb >= keepFreeMb) break;
+
+    String dayPath, dayName;
+    if (!firstEntry("/rec", &dayPath, &dayName)) break;
+
+    String recPath, recName;
+    if (!firstEntry(dayPath, &recPath, &recName)) {
+      // An empty day directory left behind by earlier deletions.
+      SD_MMC.rmdir(dayPath);
+      continue;
+    }
+
+    Serial.printf("ageing out %s, %llu MB free of %lu wanted\n", recPath.c_str(),
+                  freeMb, (unsigned long)keepFreeMb);
+    if (!removeAt(recPath, 0)) break;
+    removed++;
+  }
+
+  if (removed) refreshSpace(true);
+  return removed;
+}

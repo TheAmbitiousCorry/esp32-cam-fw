@@ -13,6 +13,8 @@ static constexpr int XCLK_HZ = 20000000;
 static constexpr int WARMUP_FRAMES = 4;
 
 static bool cameraReady = false;
+static int currentFrameSize = FRAMESIZE_SVGA;
+static int currentQuality = 12;
 
 // Power-down is asserted between attempts. A sensor that did not answer may be
 // mid-way through its own power-up, and cycling it is more likely to help than
@@ -45,8 +47,8 @@ static bool cameraTry() {
   // The OV2640 encodes JPEG in hardware. A raw format moves that work onto the
   // CPU and costs more than every other feature combined.
   cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.frame_size   = FRAMESIZE_SVGA;
-  cfg.jpeg_quality = 12;
+  cfg.frame_size   = (framesize_t)currentFrameSize;
+  cfg.jpeg_quality = currentQuality;
 
   // Three, not two. With two, a stream holding one buffer while it sends over
   // Wi-Fi leaves a single buffer for everyone else, and a recorder competing for
@@ -133,3 +135,17 @@ void flashSet(bool on) {
 }
 
 bool flashIsOn() { return flashOn; }
+
+void cameraApplySettings(int frameSize, int quality) {
+  currentFrameSize = frameSize;
+  currentQuality = quality;
+  if (!cameraReady) return;
+
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return;
+  s->set_framesize(s, (framesize_t)frameSize);
+  s->set_quality(s, quality);
+}
+
+int cameraFrameSize() { return currentFrameSize; }
+int cameraQuality() { return currentQuality; }

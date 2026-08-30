@@ -1116,6 +1116,56 @@ static esp_err_t sendRecordings(httpd_req_t *req, const String &notice) {
   body += "<label>Recording length, seconds</label>"
           "<input type=number name=recsec min=2 max=120 value=" +
           String(stored.recordSeconds) + ">";
+  body += "<h2 style=\"margin-top:24px\">When</h2>";
+  body += String("<label><input type=checkbox name=schen value=1 style=\"width:auto\"") +
+          (stored.scheduleEnabled ? " checked" : "") +
+          "> Only record during these hours</label>";
+  body += "<div class=actions>"
+          "<input type=number name=schfrom min=0 max=23 value=" +
+          String(stored.scheduleFromHour) + " style=\"width:70px\">"
+          "<span class=sub style=\"align-self:center\">to</span>"
+          "<input type=number name=schto min=0 max=23 value=" +
+          String(stored.scheduleToHour) + " style=\"width:70px\">"
+          "<span class=sub style=\"align-self:center\">o'clock</span></div>";
+  body += "<small class=sub>A start later than the end crosses midnight, so 22 to "
+          "6 means overnight. Equal values mean all day.</small>";
+
+  static const char *DAY_NAMES[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  body += "<div class=actions style=\"gap:14px\">";
+  for (int d = 0; d < 7; d++) {
+    body += String("<label style=\"margin:0;display:flex;gap:5px;align-items:center\">"
+                   "<input type=checkbox name=schday value=") + d +
+            (stored.scheduleDays & (1 << d) ? " checked" : "") +
+            " style=\"width:auto\">" + DAY_NAMES[d] + "</label>";
+  }
+  body += "</div>";
+
+  body += "<h2 style=\"margin-top:24px\">Image</h2>";
+  struct Size { int value; const char *label; };
+  static const Size SIZES[] = {{5, "320x240"},  {6, "400x296"},  {8, "640x480"},
+                               {9, "800x600"},  {10, "1024x768"}, {11, "1280x1024"},
+                               {13, "1600x1200"}};
+  body += "<label>Frame size</label><select name=fsize>";
+  for (const Size &s : SIZES) {
+    body += String("<option value=") + s.value +
+            (stored.frameSize == s.value ? " selected" : "") + ">" + s.label + "</option>";
+  }
+  body += "</select>";
+  body += "<label>JPEG quality</label>"
+          "<input type=number name=jq min=10 max=63 value=" + String(stored.jpegQuality) + ">";
+  body += "<small class=sub>10 is best and largest, 63 is worst and smallest. "
+          "Bigger frames and better quality both cost card space and Wi-Fi: "
+          "playback is limited by the link before it is limited by the device."
+          "</small>";
+
+  body += "<h2 style=\"margin-top:24px\">Storage</h2>";
+  body += "<label>Keep this much free, MB</label>"
+          "<input type=number name=keepfree min=0 max=32000 value=" +
+          String(stored.keepFreeMb) + ">";
+  body += "<small class=sub>Oldest recordings are deleted to stay above this "
+          "before a new one starts. Zero never deletes anything, and the card "
+          "eventually fills.</small>";
+
   body += "<div class=actions><button type=submit class=primary>Save</button>"
           "<a class=btn href=\"/files?path=/rec\">" + icon("folder") +
           "Saved recordings</a></div></form>";
@@ -1143,11 +1193,43 @@ static esp_err_t recordingsPostHandler(httpd_req_t *req) {
   const int secs = formField(body, "recsec").toInt();
   if (secs >= 2 && secs <= 120) stored.recordSeconds = (uint8_t)secs;
 
+  stored.scheduleEnabled = !formField(body, "schen").isEmpty();
+  const int fromH = formField(body, "schfrom").toInt();
+  const int toH = formField(body, "schto").toInt();
+  if (fromH >= 0 && fromH <= 23) stored.scheduleFromHour = (uint8_t)fromH;
+  if (toH >= 0 && toH <= 23) stored.scheduleToHour = (uint8_t)toH;
+
+  // One checkbox per day posts one value per checked day, so the mask is built
+  // by walking the pairs rather than reading a single field.
+  uint8_t days = 0;
+  int pos = 0;
+  while (pos < (int)body.length()) {
+    int amp = body.indexOf('&', pos);
+    if (amp < 0) amp = body.length();
+    const String pair = body.substring(pos, amp);
+    const int eq = pair.indexOf('=');
+    if (eq > 0 && urlDecode(pair.substring(0, eq)) == "schday") {
+      const int d = urlDecode(pair.substring(eq + 1)).toInt();
+      if (d >= 0 && d <= 6) days |= (1 << d);
+    }
+    pos = amp + 1;
+  }
+  stored.scheduleDays = days;
+
+  const int fsize = formField(body, "fsize").toInt();
+  if (fsize >= 0 && fsize <= 13) stored.frameSize = (uint8_t)fsize;
+  const int jq = formField(body, "jq").toInt();
+  if (jq >= 10 && jq <= 63) stored.jpegQuality = (uint8_t)jq;
+
+  const int keep = formField(body, "keepfree").toInt();
+  if (keep >= 0 && keep <= 32000) stored.keepFreeMb = (uint16_t)keep;
+
   if (!configSave(stored)) return sendRecordings(req, "Could not save.");
 
   // Applied immediately: this is the one setting people tune by trying it, and
   // a reboot for each attempt would make that miserable.
   motionSetSensitivity(stored.motionSensitivity);
+  cameraApplySettings(stored.frameSize, stored.jpegQuality);
   return sendRecordings(req, "Saved.");
 }
 

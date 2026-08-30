@@ -288,8 +288,28 @@ static constexpr uint32_t MOTION_COOLDOWN_MS = 4000;
 static uint32_t lastMotionCheck = 0;
 static uint32_t motionBlockedUntil = 0;
 
+// A schedule that has never seen a real clock would run against 1970, so an
+// unsynced clock means the schedule does not apply rather than blocks recording.
+static bool withinSchedule() {
+  if (!cfg.scheduleEnabled) return true;
+
+  const int hour = clockHour();
+  const int day = clockWeekday();
+  if (hour < 0 || day < 0) return true;
+
+  if (!(cfg.scheduleDays & (1 << day))) return false;
+
+  if (cfg.scheduleFromHour == cfg.scheduleToHour) return true;  // all day
+  if (cfg.scheduleFromHour < cfg.scheduleToHour) {
+    return hour >= cfg.scheduleFromHour && hour < cfg.scheduleToHour;
+  }
+  // Crosses midnight: 22 to 6 means 22, 23, 0 through 5.
+  return hour >= cfg.scheduleFromHour || hour < cfg.scheduleToHour;
+}
+
 static void motionTick() {
   if (!cfg.motionEnabled || !cameraReady || portalMode) return;
+  if (!withinSchedule()) return;
   if (recordingActive()) {
     // Nothing to decide while already recording, and the recorder owns the
     // camera. Hold the cooldown open until it finishes.
@@ -307,6 +327,10 @@ static void motionTick() {
 
   if (moved) {
     Serial.printf("motion: %u%% of the scene changed, recording\n", motionLastChange());
+    // Before starting, not after: making room once the card is already full is
+    // too late, and a recording that fails halfway is worse than one deferred.
+    const int aged = sdAgeOut(cfg.keepFreeMb);
+    if (aged) Serial.printf("aged out %d old recordings to make room\n", aged);
     recordingStart(cfg.recordSeconds);
   }
 }
@@ -409,7 +433,9 @@ void setup() {
   // peripheral running, and the sensor's power-up is the thing that has been
   // failing. It is also the primary function: if only one of the two can come
   // up, it should be the camera.
+  cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
   cameraReady = cameraInit();
+  cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
   motionInit();
   motionSetSensitivity(cfg.motionSensitivity);
 

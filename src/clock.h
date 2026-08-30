@@ -23,3 +23,8 @@ String clockStamp();
 // with hundreds of them does not make a directory nobody can list.
 String clockDate();
 String clockTime();
+
+// Local hour 0-23 and weekday with Sunday as 0. Both return -1 until the clock
+// has synced, so a schedule cannot silently run against the epoch.
+int clockHour();
+int clockWeekday();

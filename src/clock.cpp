@@ -37,3 +37,20 @@ String clockNow() { return formatted("%Y-%m-%d %H:%M:%S"); }
 String clockStamp() { return formatted("%Y%m%d-%H%M%S"); }
 String clockDate() { return formatted("%Y-%m-%d"); }
 String clockTime() { return formatted("%H%M%S"); }
+
+static bool localNow(struct tm *out) {
+  if (!clockSynced()) return false;
+  time_t now = time(nullptr);
+  localtime_r(&now, out);
+  return true;
+}
+
+int clockHour() {
+  struct tm t;
+  return localNow(&t) ? t.tm_hour : -1;
+}
+
+int clockWeekday() {
+  struct tm t;
+  return localNow(&t) ? t.tm_wday : -1;
+}

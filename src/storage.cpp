@@ -232,6 +232,42 @@ size_t sdReadAt(void *handle, uint32_t offset, uint8_t *out, size_t len) {
   return f->read(out, len);
 }
 
+String sdReadSmall(const String &path, size_t maxLen) {
+  if (!mounted || !sdPathIsSafe(path)) return "";
+  File f = SD_MMC.open(path, FILE_READ);
+  if (!f) return "";
+  String out;
+  while (f.available() && out.length() < maxLen) out += (char)f.read();
+  f.close();
+  return out;
+}
+
+bool sdWriteSmall(const String &path, const String &contents) {
+  if (!mounted || !sdPathIsSafe(path)) return false;
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) return false;
+  const size_t n = f.print(contents);
+  f.close();
+  return n == contents.length();
+}
+
+size_t sdFileSize(const String &path) {
+  if (!mounted || !sdPathIsSafe(path)) return 0;
+  File f = SD_MMC.open(path, FILE_READ);
+  if (!f) return 0;
+  const size_t n = f.size();
+  f.close();
+  return n;
+}
+
+// Sequential read, so a download does not seek back to the start of the file for
+// every chunk it sends.
+size_t sdReadNext(void *handle, uint8_t *out, size_t len) {
+  File *f = (File *)handle;
+  if (!f || !*f) return 0;
+  return f->read(out, len);
+}
+
 void sdCloseRead(void *handle) {
   File *f = (File *)handle;
   if (!f) return;

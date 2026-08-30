@@ -254,6 +254,13 @@ void recordingStop() {
   if (videoFile) videoFile.close();
   if (indexFile) indexFile.close();
   const float seconds = (millis() - startedAt) / 1000.0f;
+
+  // A summary file, so listing a day does not mean opening and parsing an index
+  // for every recording in it.
+  char meta[96];
+  snprintf(meta, sizeof(meta), "%lu %lu %lu\n", (unsigned long)frames,
+           (unsigned long)(millis() - startedAt), (unsigned long)bytes);
+  sdWriteSmall(dir + "/meta.txt", meta);
   Serial.printf("recording done: %lu frames, %lu KB, %.1f fps over %.1fs\n",
                 (unsigned long)frames, (unsigned long)(bytes / 1024), recordingFps(), seconds);
 }

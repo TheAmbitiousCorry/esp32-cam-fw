@@ -61,6 +61,10 @@ static String icon(const char *name) {
     d = "<rect x='2' y='3' width='12' height='10' rx='1'/><path d='M2 11l3-3 3 3 3-3 3 3'/>";
   else if (!strcmp(name, "up"))
     d = "<path d='M8 13V3M4 7l4-4 4 4'/>";
+  else if (!strcmp(name, "down"))
+    d = "<path d='M8 3v10M4 9l4 4 4-4'/>";
+  else if (!strcmp(name, "zoom"))
+    d = "<circle cx='7' cy='7' r='4.5'/><path d='M10.5 10.5L14 14M5 7h4M7 5v4'/>";
   else
     return "";
 
@@ -108,6 +112,11 @@ static const char SHARED_CSS[] =
     "main{flex:1;padding:22px;min-width:0}"
     "h1{font-size:19px;margin:0 0 16px}h2{font-size:17px;margin:0 0 6px}"
     "img{max-width:100%;border-radius:6px;background:#000;display:block}"
+    ".zoomwrap{position:relative;overflow:hidden;max-width:100%;border-radius:6px;"
+    "background:#000;touch-action:none}"
+    ".zoomwrap img{display:block;transform-origin:0 0;cursor:grab}"
+    ".zoomwrap img.dragging{cursor:grabbing}"
+
     ".actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}"
     "button,.btn{padding:9px 15px;border:1px solid #3a3a3a;border-radius:6px;"
     "background:#222;color:#eee;font:inherit;font-size:14px;cursor:pointer;"
@@ -241,7 +250,13 @@ static esp_err_t logoutHandler(httpd_req_t *req) {
   return httpd_resp_send(req, "", 0);
 }
 
-static const char INDEX_BODY[] = R"HTML(<img id="v" alt="live view">
+static const char INDEX_BODY[] = R"HTML(<div class=zoomwrap id=zw><img id="v" alt="live view"></div>
+<div class=actions>
+  <button type=button onclick="zoomOut()">Zoom out</button>
+  <button type=button onclick="zoomIn()">Zoom in</button>
+  <button type=button onclick="zoomReset()">Fit</button>
+  <span id=zlabel class=sub style="align-self:center"></span>
+</div>
 <script>
 const rb = document.getElementById('rec');
 let recPoll = null;
@@ -294,6 +309,112 @@ if (fb) fb.onclick = async () => {
 // The stream lives on its own port, so build the URL from wherever this page was
 // served rather than hardcoding an address.
 document.getElementById('v').src = 'http://' + location.hostname + ':81/stream';
+
+// Digital zoom in the browser. The device sends the same pixels either way, so
+// this buys framing rather than detail; cropping at the sensor would buy detail
+// and is a separate job. Free here, and it works on recordings too.
+function attachZoom(wrapId, imgId, labelId) {
+  const wrap = document.getElementById(wrapId);
+  const img = document.getElementById(imgId);
+  const label = document.getElementById(labelId);
+  if (!wrap || !img) return;
+
+  let scale = 1, tx = 0, ty = 0, dragging = false, moved = 0, lastX = 0, lastY = 0;
+
+  // Where the buttons zoom towards. Set by clicking, so zooming in on a corner
+  // does not mean zooming to the middle and then dragging to the corner.
+  let focusX = null, focusY = null;
+  const fx = () => (focusX === null ? wrap.clientWidth / 2 : focusX);
+  const fy = () => (focusY === null ? wrap.clientHeight / 2 : focusY);
+
+  const marker = document.createElement('div');
+  marker.style.cssText = 'position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;' +
+      'border:2px solid #2a7;border-radius:50%;pointer-events:none;opacity:0;' +
+      'transition:opacity .4s';
+  wrap.appendChild(marker);
+
+  const showMarker = (x, y) => {
+    marker.style.left = x + 'px';
+    marker.style.top = y + 'px';
+    marker.style.opacity = '1';
+    setTimeout(() => { marker.style.opacity = '0'; }, 700);
+  };
+
+  const clamp = () => {
+    // Keep the visible area inside the picture, or panning wanders off into
+    // blank space and looks broken.
+    const maxX = wrap.clientWidth * (scale - 1);
+    const maxY = wrap.clientHeight * (scale - 1);
+    tx = Math.min(0, Math.max(-maxX, tx));
+    ty = Math.min(0, Math.max(-maxY, ty));
+  };
+  const apply = () => {
+    clamp();
+    img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    if (label) label.textContent = scale.toFixed(1) + 'x';
+  };
+
+  const zoomAt = (factor, cx, cy) => {
+    const next = Math.min(8, Math.max(1, scale * factor));
+    // Zoom about the given point rather than the corner, so whatever is under it
+    // stays under it.
+    tx = cx - (cx - tx) * (next / scale);
+    ty = cy - (cy - ty) * (next / scale);
+    scale = next;
+    if (scale === 1) { tx = 0; ty = 0; focusX = focusY = null; }
+    apply();
+  };
+
+  wrap.addEventListener('wheel', e => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    focusX = e.clientX - r.left;
+    focusY = e.clientY - r.top;
+    zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, focusX, focusY);
+  }, {passive: false});
+
+  wrap.addEventListener('pointerdown', e => {
+    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
+    wrap.setPointerCapture(e.pointerId);
+  });
+  wrap.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    moved += Math.abs(dx) + Math.abs(dy);
+    // Only pan once zoomed in; below that there is nothing to pan to.
+    if (scale > 1) {
+      tx += dx; ty += dy;
+      img.classList.add('dragging');
+      apply();
+    }
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  const end = e => {
+    if (!dragging) return;
+    dragging = false;
+    img.classList.remove('dragging');
+
+    // A press that did not travel is a click: set the focus there and zoom in.
+    // Five pixels of slop, because a finger never holds perfectly still.
+    if (moved < 5) {
+      const r = wrap.getBoundingClientRect();
+      focusX = e.clientX - r.left;
+      focusY = e.clientY - r.top;
+      showMarker(focusX, focusY);
+      zoomAt(1.6, focusX, focusY);
+    }
+  };
+  wrap.addEventListener('pointerup', end);
+  wrap.addEventListener('pointercancel', () => { dragging = false; });
+  wrap.addEventListener('dblclick', e => { e.preventDefault(); });
+
+  window.zoomIn = () => zoomAt(1.4, fx(), fy());
+  window.zoomOut = () => zoomAt(1 / 1.4, fx(), fy());
+  window.zoomReset = () => { scale = 1; tx = 0; ty = 0; focusX = focusY = null; apply(); };
+  apply();
+}
+
+attachZoom('zw', 'v', 'zlabel');
 </script>
 )HTML";
 
@@ -527,6 +648,11 @@ static esp_err_t frameHandler(httpd_req_t *req) {
   return res;
 }
 
+static String parentOf(const String &path) {
+  const int cut = path.lastIndexOf('/');
+  return cut <= 0 ? "/" : path.substring(0, cut);
+}
+
 static esp_err_t playPageHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
 
@@ -536,12 +662,18 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
   }
 
   String body = "<h1>" + htmlEscape(dir) + "</h1>";
-  body += "<img id=p alt=\"recording\">";
+  body += "<div class=zoomwrap id=zw><img id=p alt=\"recording\"></div>";
   body += "<input type=range id=scrub min=0 max=0 value=0 style=\"margin:14px 0\">";
+  body += "<div class=actions>"
+          "<button type=button onclick=\"zoomOut()\">Zoom out</button>"
+          "<button type=button onclick=\"zoomIn()\">Zoom in</button>"
+          "<button type=button onclick=\"zoomReset()\">Fit</button>"
+          "<span id=zlabel class=sub style=\"align-self:center\"></span></div>";
   body += "<div class=actions>"
           "<button id=pp class=primary>" + icon("play") + "Play</button>"
           "<span id=pos class=sub style=\"align-self:center\"></span>"
-          "<a class=btn href=\"/files?path=/rec\">Back</a></div>";
+          "<a class=btn href=\"/files?path=" + htmlEscape(parentOf(dir)) +
+          "\">" + icon("up") + "Back</a></div>";
   body += "<script>const DIR='" + dir + "';</script>";
   body += R"HTML(<script>
 const img = document.getElementById('p');
@@ -622,6 +754,113 @@ const startPlaying = () => {
 
 pp.onclick = () => (playing ? stopPlaying() : startPlaying());
 bar.oninput = () => { if (playing) stopPlaying(); show(+bar.value); };
+
+
+// Digital zoom in the browser. The device sends the same pixels either way, so
+// this buys framing rather than detail; cropping at the sensor would buy detail
+// and is a separate job. Free here, and it works on recordings too.
+function attachZoom(wrapId, imgId, labelId) {
+  const wrap = document.getElementById(wrapId);
+  const img = document.getElementById(imgId);
+  const label = document.getElementById(labelId);
+  if (!wrap || !img) return;
+
+  let scale = 1, tx = 0, ty = 0, dragging = false, moved = 0, lastX = 0, lastY = 0;
+
+  // Where the buttons zoom towards. Set by clicking, so zooming in on a corner
+  // does not mean zooming to the middle and then dragging to the corner.
+  let focusX = null, focusY = null;
+  const fx = () => (focusX === null ? wrap.clientWidth / 2 : focusX);
+  const fy = () => (focusY === null ? wrap.clientHeight / 2 : focusY);
+
+  const marker = document.createElement('div');
+  marker.style.cssText = 'position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;' +
+      'border:2px solid #2a7;border-radius:50%;pointer-events:none;opacity:0;' +
+      'transition:opacity .4s';
+  wrap.appendChild(marker);
+
+  const showMarker = (x, y) => {
+    marker.style.left = x + 'px';
+    marker.style.top = y + 'px';
+    marker.style.opacity = '1';
+    setTimeout(() => { marker.style.opacity = '0'; }, 700);
+  };
+
+  const clamp = () => {
+    // Keep the visible area inside the picture, or panning wanders off into
+    // blank space and looks broken.
+    const maxX = wrap.clientWidth * (scale - 1);
+    const maxY = wrap.clientHeight * (scale - 1);
+    tx = Math.min(0, Math.max(-maxX, tx));
+    ty = Math.min(0, Math.max(-maxY, ty));
+  };
+  const apply = () => {
+    clamp();
+    img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    if (label) label.textContent = scale.toFixed(1) + 'x';
+  };
+
+  const zoomAt = (factor, cx, cy) => {
+    const next = Math.min(8, Math.max(1, scale * factor));
+    // Zoom about the given point rather than the corner, so whatever is under it
+    // stays under it.
+    tx = cx - (cx - tx) * (next / scale);
+    ty = cy - (cy - ty) * (next / scale);
+    scale = next;
+    if (scale === 1) { tx = 0; ty = 0; focusX = focusY = null; }
+    apply();
+  };
+
+  wrap.addEventListener('wheel', e => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    focusX = e.clientX - r.left;
+    focusY = e.clientY - r.top;
+    zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, focusX, focusY);
+  }, {passive: false});
+
+  wrap.addEventListener('pointerdown', e => {
+    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
+    wrap.setPointerCapture(e.pointerId);
+  });
+  wrap.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    moved += Math.abs(dx) + Math.abs(dy);
+    // Only pan once zoomed in; below that there is nothing to pan to.
+    if (scale > 1) {
+      tx += dx; ty += dy;
+      img.classList.add('dragging');
+      apply();
+    }
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  const end = e => {
+    if (!dragging) return;
+    dragging = false;
+    img.classList.remove('dragging');
+
+    // A press that did not travel is a click: set the focus there and zoom in.
+    // Five pixels of slop, because a finger never holds perfectly still.
+    if (moved < 5) {
+      const r = wrap.getBoundingClientRect();
+      focusX = e.clientX - r.left;
+      focusY = e.clientY - r.top;
+      showMarker(focusX, focusY);
+      zoomAt(1.6, focusX, focusY);
+    }
+  };
+  wrap.addEventListener('pointerup', end);
+  wrap.addEventListener('pointercancel', () => { dragging = false; });
+  wrap.addEventListener('dblclick', e => { e.preventDefault(); });
+
+  window.zoomIn = () => zoomAt(1.4, fx(), fy());
+  window.zoomOut = () => zoomAt(1 / 1.4, fx(), fy());
+  window.zoomReset = () => { scale = 1; tx = 0; ty = 0; focusX = focusY = null; apply(); };
+  apply();
+}
+
+attachZoom('zw', 'p', 'zlabel');
 
 (async () => {
   idx = await (await fetch('/recindex?dir=' + encodeURIComponent(DIR))).json();
@@ -917,6 +1156,48 @@ static esp_err_t cameraRetryHandler(httpd_req_t *req) {
                        "</div>");
 }
 
+// Streams any file off the card in chunks. Recordings run to tens of megabytes,
+// so the whole file never exists in memory at once.
+static esp_err_t downloadHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const String path = queryParam(req, "path", "");
+  if (!sdPathIsSafe(path) || !sdExists(path)) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "no such file", HTTPD_RESP_USE_STRLEN);
+  }
+
+  void *fh = nullptr;
+  if (!sdOpenRead(path, &fh)) return httpd_resp_send_500(req);
+
+  static constexpr size_t CHUNK = 8192;
+  uint8_t *buf = (uint8_t *)ps_malloc(CHUNK);
+  if (!buf) {
+    sdCloseRead(fh);
+    return httpd_resp_send_500(req);
+  }
+
+  // The name after the last slash, so a browser saves it as something meaningful
+  // rather than as the query string.
+  const int cut = path.lastIndexOf('/');
+  const String name = cut >= 0 ? path.substring(cut + 1) : path;
+  const String disp = "attachment; filename=\"" + name + "\"";
+
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Content-Disposition", disp.c_str());
+
+  esp_err_t res = ESP_OK;
+  while (res == ESP_OK) {
+    const size_t got = sdReadNext(fh, buf, CHUNK);
+    if (got == 0) break;
+    res = httpd_resp_send_chunk(req, (const char *)buf, got);
+  }
+  free(buf);
+  sdCloseRead(fh);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return res;
+}
+
 static esp_err_t restartHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   const esp_err_t res = sendShell(req, "/status",
@@ -1030,8 +1311,33 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     }
 
     if (entries[i].isDir && sdExists(entries[i].path + "/video.mjpeg")) {
-      action = "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
-               htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
+      // "<frames> <milliseconds> <bytes>", written when the recording stopped.
+      const String meta = sdReadSmall(entries[i].path + "/meta.txt", 96);
+      if (meta.length() > 2) {
+        const int sp1 = meta.indexOf(' ');
+        const int sp2 = meta.indexOf(' ', sp1 + 1);
+        const long durMs = meta.substring(sp1 + 1, sp2).toInt();
+        const long kb = meta.substring(sp2 + 1).toInt() / 1024;
+
+        String ends;
+        // Start comes from the directory name; the end is start plus duration.
+        if (entries[i].name.length() == 6 && durMs > 0) {
+          const int h = entries[i].name.substring(0, 2).toInt();
+          const int m = entries[i].name.substring(2, 4).toInt();
+          const int sec = entries[i].name.substring(4, 6).toInt();
+          long endSec = h * 3600L + m * 60L + sec + (durMs + 500) / 1000;
+          endSec %= 86400L;
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%02ld:%02ld:%02ld", endSec / 3600,
+                   (endSec % 3600) / 60, endSec % 60);
+          ends = String(" to ") + buf;
+        }
+
+        action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends +
+                 ", " + String(kb) + " KB</span> ";
+      }
+      action += "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
+                htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
     }
 
     String cell = icon(entries[i].isDir ? "folder" : "image") + htmlEscape(label);
@@ -1039,9 +1345,14 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
       cell = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + cell + "</a>";
     }
 
-    const String size = entries[i].isDir
-                            ? action
-                            : String((uint32_t)(entries[i].size / 1024)) + " KB";
+    String size;
+    if (entries[i].isDir) {
+      size = action;
+    } else {
+      size = String((uint32_t)(entries[i].size / 1024)) + " KB "
+             "<a class=btn style=\"padding:3px 9px\" href=\"/download?path=" +
+             htmlEscape(entries[i].path) + "\">" + icon("down") + "Save</a>";
+    }
 
     body += "<tr><td style=\"padding-right:12px\">"
             "<input type=checkbox name=f value=\"" + htmlEscape(entries[i].path) +
@@ -1463,6 +1774,7 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t recspost = {"/recording", HTTP_POST, recordingsPostHandler, nullptr};
   httpd_uri_t recidx  = {"/recindex", HTTP_GET,  recIndexHandler,     nullptr};
   httpd_uri_t frame   = {"/frame",    HTTP_GET,  frameHandler,        nullptr};
+  httpd_uri_t dl      = {"/download", HTTP_GET,  downloadHandler,     nullptr};
   httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};
   httpd_uri_t filesdel = {"/files",   HTTP_POST, filesDeleteHandler,  nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
@@ -1505,6 +1817,7 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &recspost);
   registerUri(pageServer, &recidx);
   registerUri(pageServer, &frame);
+  registerUri(pageServer, &dl);
   registerUri(pageServer, &files);
   registerUri(pageServer, &filesdel);
   registerUri(pageServer, &capture);

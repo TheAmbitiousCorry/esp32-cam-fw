@@ -59,6 +59,13 @@ bool sdExists(const String &path);
 bool sdOpenRead(const String &path, void **handle);
 size_t sdReadAt(void *handle, uint32_t offset, uint8_t *out, size_t len);
 void sdCloseRead(void *handle);
+size_t sdFileSize(const String &path);
+
+// Reads a small file whole. For the per-recording metadata only: anything that
+// might be large belongs in sdOpenRead and chunks.
+String sdReadSmall(const String &path, size_t maxLen = 256);
+bool sdWriteSmall(const String &path, const String &contents);
+size_t sdReadNext(void *handle, uint8_t *out, size_t len);
 
 // Reads one line of an index file. Returns false at end of file.
 bool sdIndexOpen(const String &path, void **handle);

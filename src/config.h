@@ -31,7 +31,12 @@ struct Config {
   // which is why it is stored rather than compiled in.
   bool motionEnabled = false;
   uint8_t motionSensitivity = 20;
+  // Seconds of history to keep before a trigger, and seconds of quiet before a
+  // recording ends. recordSeconds is now a minimum rather than a cap: a
+  // recording that stops mid-event is worse than one that runs a little long.
   uint8_t recordSeconds = 10;
+  uint8_t prerollSeconds = 5;
+  uint8_t quietSeconds = 5;
 
   // Free space to protect, in MB. When a recording would take the card below
   // this, the oldest recordings are removed first. Zero disables it.

@@ -31,6 +31,29 @@ static size_t pubLen = 0;
 static uint32_t pubSeq = 0;
 static portMUX_TYPE pubLock = portMUX_INITIALIZER_UNLOCKED;
 
+// A circular byte arena with a ring of descriptors into it. One allocation
+// rather than a malloc per frame: frames vary in size, and repeatedly freeing
+// and allocating varying blocks fragments PSRAM until a large one cannot be had.
+static constexpr int PREROLL_MAX_FRAMES = 200;
+
+struct PreFrame {
+  uint32_t off;
+  uint32_t len;
+  uint32_t at;
+};
+
+static uint8_t *preArena = nullptr;
+static size_t preArenaSize = 0;
+static size_t preWritePos = 0;
+static PreFrame preRing[PREROLL_MAX_FRAMES];
+static uint32_t preWindowMs = 5000;
+static int preHead = 0;   // next slot to write
+static int preCount = 0;
+
+static bool (*activityCheck)(camera_fb_t *) = nullptr;
+static uint32_t activityQuietMs = 0;
+static bool triggered = false;
+
 static uint32_t grabTotalMs = 0;
 static uint32_t writeTotalMs = 0;
 static uint32_t indexTotalMs = 0;
@@ -50,6 +73,102 @@ static uint32_t nextRecordingNumber() {
   }
   root.close();
   return highest + 1;
+}
+
+void prerollInit(size_t bytes) {
+  if (preArena) free(preArena);
+  preArena = (uint8_t *)ps_malloc(bytes);
+  preArenaSize = preArena ? bytes : 0;
+  preWritePos = 0;
+  preHead = 0;
+  preCount = 0;
+  Serial.printf("preroll: %u KB buffer %s\n", (unsigned)(bytes / 1024),
+                preArena ? "ready" : "FAILED to allocate");
+}
+
+// Drops the oldest descriptors whose bytes are about to be overwritten. Without
+// this a wrapped write would silently corrupt the frames it landed on.
+static void preDropOverlapping(size_t from, size_t len) {
+  const size_t to = from + len;
+  while (preCount > 0) {
+    const int tail = (preHead - preCount + PREROLL_MAX_FRAMES) % PREROLL_MAX_FRAMES;
+    const size_t tFrom = preRing[tail].off;
+    const size_t tTo = tFrom + preRing[tail].len;
+    if (tTo <= from || tFrom >= to) break;  // no overlap
+    preCount--;
+  }
+}
+
+void prerollPush(const camera_fb_t *fb) {
+  if (!preArena || !fb || fb->len == 0 || fb->len > preArenaSize) return;
+
+  if (preWritePos + fb->len > preArenaSize) preWritePos = 0;
+  preDropOverlapping(preWritePos, fb->len);
+
+  memcpy(preArena + preWritePos, fb->buf, fb->len);
+  const uint32_t now = millis();
+  preRing[preHead] = {(uint32_t)preWritePos, (uint32_t)fb->len, now};
+  preHead = (preHead + 1) % PREROLL_MAX_FRAMES;
+  if (preCount < PREROLL_MAX_FRAMES) preCount++;
+  preWritePos += fb->len;
+
+  // Age out anything beyond the window. Without this the buffer holds whatever
+  // fits in the arena, which is a different number of seconds for every frame
+  // size and makes the setting meaningless.
+  while (preCount > 1) {
+    const int tail = (preHead - preCount + PREROLL_MAX_FRAMES) % PREROLL_MAX_FRAMES;
+    if (now - preRing[tail].at <= preWindowMs) break;
+    preCount--;
+  }
+}
+
+void prerollSetWindow(uint32_t seconds) { preWindowMs = seconds * 1000; }
+
+uint32_t prerollFrames() { return preCount; }
+
+uint32_t prerollSeconds() {
+  if (preCount < 2) return 0;
+  const int tail = (preHead - preCount + PREROLL_MAX_FRAMES) % PREROLL_MAX_FRAMES;
+  const int newest = (preHead - 1 + PREROLL_MAX_FRAMES) % PREROLL_MAX_FRAMES;
+  return (preRing[newest].at - preRing[tail].at) / 1000;
+}
+
+void recordingExtend(uint32_t quietSeconds) {
+  if (!active) return;
+  const uint32_t target = millis() + quietSeconds * 1000;
+  if ((int32_t)(target - stopAt) > 0) stopAt = target;
+}
+
+void recordingSetActivityCheck(bool (*fn)(camera_fb_t *), uint32_t quietSeconds) {
+  activityCheck = fn;
+  activityQuietMs = quietSeconds * 1000;
+}
+
+bool recordingWasTriggered() { return triggered; }
+void recordingMarkTriggered() { triggered = true; }
+
+// Writes the buffered history at the head of a new recording, oldest first, so
+// the file opens on the approach rather than on the arrival.
+static void writePreroll() {
+  if (!preArena || preCount == 0) return;
+
+  const int tail = (preHead - preCount + PREROLL_MAX_FRAMES) % PREROLL_MAX_FRAMES;
+  const uint32_t base = preRing[tail].at;
+
+  for (int i = 0; i < preCount; i++) {
+    const PreFrame &f = preRing[(tail + i) % PREROLL_MAX_FRAMES];
+    const uint32_t offset = bytes;
+    if (videoFile.write(preArena + f.off, f.len) != f.len) return;
+    // Timestamps are shifted so the recording starts at zero and the trigger
+    // lands wherever it actually happened within it.
+    indexFile.printf("%lu %lu %lu\n", (unsigned long)offset, (unsigned long)f.len,
+                     (unsigned long)(f.at - base));
+    frames++;
+    bytes += f.len;
+  }
+  Serial.printf("preroll: wrote %d frames covering %lus\n", preCount,
+                (unsigned long)((preRing[(preHead - 1 + PREROLL_MAX_FRAMES) %
+                                          PREROLL_MAX_FRAMES].at - base) / 1000));
 }
 
 bool recordingStart(uint32_t seconds) {
@@ -101,6 +220,16 @@ bool recordingStart(uint32_t seconds) {
   writeTotalMs = 0;
   indexTotalMs = 0;
   active = true;
+  triggered = false;
+
+  // Written before the clock starts so the recorded length covers the history
+  // plus the event, not just the event.
+  writePreroll();
+  if (frames) startedAt = millis() - (preRing[(preHead - 1 + PREROLL_MAX_FRAMES) %
+                                              PREROLL_MAX_FRAMES].at -
+                                      preRing[(preHead - preCount + PREROLL_MAX_FRAMES) %
+                                              PREROLL_MAX_FRAMES].at);
+
   Serial.printf("recording to %s for %lus\n", dir.c_str(), (unsigned long)seconds);
   return true;
 }
@@ -158,6 +287,10 @@ void recordingTick() {
 
   frames++;
   bytes += written;
+
+  // Asked on the frame already in hand, so extending a recording costs no extra
+  // capture and no contention for the camera.
+  if (activityCheck && activityCheck(fb)) recordingExtend(activityQuietMs / 1000);
 
   // Publish a copy so a viewer sees what is being recorded without competing for
   // the camera. Allocated once, on the first frame, sized for this recording.

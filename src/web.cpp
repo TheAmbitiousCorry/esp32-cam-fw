@@ -246,24 +246,43 @@ static const char INDEX_BODY[] = R"HTML(<img id="v" alt="live view">
 const rb = document.getElementById('rec');
 let recPoll = null;
 
+const ms = document.getElementById('motionstate');
+
 async function refreshRec() {
   const s = await (await fetch('/record')).json();
+
   if (s.active) {
     rb.textContent = 'Recording  ' + s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps';
     rb.className = 'on';
   } else {
-    rb.textContent = 'Record 10s';
+    rb.textContent = 'Record';
     rb.className = '';
-    clearInterval(recPoll);
-    recPoll = null;
+  }
+
+  if (ms) {
+    if (s.active && s.triggered) {
+      ms.textContent = 'Motion recording in progress. Continues until the scene is still.';
+    } else if (s.active) {
+      ms.textContent = 'Recording, started by hand.';
+    } else if (!s.motion) {
+      ms.textContent = 'Motion recording is off.';
+    } else if (!s.armed) {
+      ms.textContent = 'Motion recording is outside its schedule. Currently seeing ' +
+                       s.change + '% change.';
+    } else {
+      ms.textContent = 'Watching for motion. Currently seeing ' + s.change +
+                       '% change, ' + s.preSecs + 's of history buffered.';
+    }
   }
 }
 
-if (rb) rb.onclick = async () => {
-  await fetch('/record', {method: 'POST'});
-  if (!recPoll) recPoll = setInterval(refreshRec, 1000);
+// Always polling, not only after pressing the button: a recording that starts on
+// motion should be visible without having pressed anything.
+if (rb) {
+  rb.onclick = async () => { await fetch('/record', {method: 'POST'}); refreshRec(); };
   refreshRec();
-};
+  setInterval(refreshRec, 2000);
+}
 
 const fb = document.getElementById('flash');
 if (fb) fb.onclick = async () => {
@@ -293,8 +312,9 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   body += "<a class=btn href=\"/capture\" target=_blank>" + icon("image") +
           "Still image</a>";
   body += String("<button id=rec class=\"") + (recordingActive() ? "on" : "") + "\">" +
-          icon("dot") + (recordingActive() ? "Recording..." : "Record 10s") +
+          icon("dot") + (recordingActive() ? "Recording..." : "Record") +
           "</button></div>";
+  body += "<p id=motionstate class=sub style=\"margin:0 0 10px\"></p>";
   body += INDEX_BODY;
   return sendShell(req, "/", body);
 }
@@ -305,15 +325,23 @@ static esp_err_t indexHandler(httpd_req_t *req) {
 // to do. Without it the label reads "Recording..." indefinitely.
 static esp_err_t recordStateHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
-  char out[200];
+  char out[320];
   uint32_t grab = 0, write = 0, index = 0;
   recordingTiming(&grab, &write, &index);
+  Config c;
+  configLoad(c);
   snprintf(out, sizeof(out),
            "{\"active\":%s,\"frames\":%lu,\"fps\":%.1f,"
-           "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu}",
+           "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu,"
+           "\"triggered\":%s,\"motion\":%s,\"armed\":%s,\"change\":%u,"
+           "\"preFrames\":%lu,\"preSecs\":%lu}",
            recordingActive() ? "true" : "false",
            (unsigned long)recordingFrames(), recordingFps(),
-           (unsigned long)grab, (unsigned long)write, (unsigned long)index);
+           (unsigned long)grab, (unsigned long)write, (unsigned long)index,
+           recordingWasTriggered() ? "true" : "false",
+           c.motionEnabled ? "true" : "false",
+           motionArmed() ? "true" : "false", motionLastChange(),
+           (unsigned long)prerollFrames(), (unsigned long)prerollSeconds());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
 }
@@ -1113,9 +1141,19 @@ static esp_err_t sendRecordings(httpd_req_t *req, const String &notice) {
           "<b>" + String(motionLastChange()) + "%</b> changing between frames. "
           "Watch that with the scene still, then while something moves, and pick a "
           "number between the two.</small>";
-  body += "<label>Recording length, seconds</label>"
+  body += "<label>Minimum recording length, seconds</label>"
           "<input type=number name=recsec min=2 max=120 value=" +
           String(stored.recordSeconds) + ">";
+  body += "<label>Seconds of history to keep before a trigger</label>"
+          "<input type=number name=presec min=0 max=20 value=" +
+          String(stored.prerollSeconds) + ">";
+  body += "<label>Seconds of stillness before a recording ends</label>"
+          "<input type=number name=quietsec min=1 max=60 value=" +
+          String(stored.quietSeconds) + ">";
+  body += "<small class=sub>A motion recording runs at least the minimum, then "
+          "keeps going while the scene keeps changing. History is limited by "
+          "memory as well as by this number: larger frames buy fewer seconds."
+          "</small>";
   body += "<h2 style=\"margin-top:24px\">When</h2>";
   body += String("<label><input type=checkbox name=schen value=1 style=\"width:auto\"") +
           (stored.scheduleEnabled ? " checked" : "") +
@@ -1196,6 +1234,10 @@ static esp_err_t recordingsPostHandler(httpd_req_t *req) {
   if (sens >= 1 && sens <= 100) stored.motionSensitivity = (uint8_t)sens;
   const int secs = formField(body, "recsec").toInt();
   if (secs >= 2 && secs <= 120) stored.recordSeconds = (uint8_t)secs;
+  const int pre = formField(body, "presec").toInt();
+  if (pre >= 0 && pre <= 20) stored.prerollSeconds = (uint8_t)pre;
+  const int quiet = formField(body, "quietsec").toInt();
+  if (quiet >= 1 && quiet <= 60) stored.quietSeconds = (uint8_t)quiet;
 
   stored.scheduleEnabled = !formField(body, "schen").isEmpty();
   const int fromH = formField(body, "schfrom").toInt();
@@ -1234,6 +1276,7 @@ static esp_err_t recordingsPostHandler(httpd_req_t *req) {
   // a reboot for each attempt would make that miserable.
   motionSetSensitivity(stored.motionSensitivity);
   cameraApplySettings(stored.frameSize, stored.jpegQuality);
+  prerollSetWindow(stored.prerollSeconds);
   return sendRecordings(req, "Saved.");
 }
 

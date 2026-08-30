@@ -290,6 +290,8 @@ static uint32_t motionBlockedUntil = 0;
 
 // A schedule that has never seen a real clock would run against 1970, so an
 // unsynced clock means the schedule does not apply rather than blocks recording.
+bool motionArmed();
+
 static bool withinSchedule() {
   if (!cfg.scheduleEnabled) return true;
 
@@ -307,12 +309,21 @@ static bool withinSchedule() {
   return hour >= cfg.scheduleFromHour || hour < cfg.scheduleToHour;
 }
 
+// Runs on the frame the recorder already has, so keeping a recording alive costs
+// no extra capture. Returns true while the scene is still changing.
+static bool stillMoving(camera_fb_t *fb) {
+  if (!cfg.motionEnabled) return false;
+  return motionCheck(fb);
+}
+
+bool motionArmed() { return cfg.motionEnabled && withinSchedule(); }
+
 static void motionTick() {
   if (!cfg.motionEnabled || !cameraReady || portalMode) return;
   if (!withinSchedule()) return;
   if (recordingActive()) {
-    // Nothing to decide while already recording, and the recorder owns the
-    // camera. Hold the cooldown open until it finishes.
+    // The recorder owns the camera and extends itself through the activity
+    // check, so there is nothing to do here but hold the cooldown open.
     motionBlockedUntil = millis() + MOTION_COOLDOWN_MS;
     return;
   }
@@ -323,6 +334,11 @@ static void motionTick() {
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) return;
   const bool moved = motionCheck(fb);
+
+  // Every frame the detector sees goes into the history, whether or not it
+  // triggered. That history is the whole point: by the time something has
+  // moved enough to trigger, the interesting part has already happened.
+  if (cfg.prerollSeconds > 0) prerollPush(fb);
   esp_camera_fb_return(fb);
 
   if (moved) {
@@ -331,7 +347,9 @@ static void motionTick() {
     // too late, and a recording that fails halfway is worse than one deferred.
     const int aged = sdAgeOut(cfg.keepFreeMb);
     if (aged) Serial.printf("aged out %d old recordings to make room\n", aged);
-    recordingStart(cfg.recordSeconds);
+
+    recordingSetActivityCheck(stillMoving, cfg.quietSeconds);
+    if (recordingStart(cfg.recordSeconds)) recordingMarkTriggered();
   }
 }
 
@@ -436,6 +454,12 @@ void setup() {
   cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
   cameraReady = cameraInit();
   cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
+
+  // A megabyte and a half holds roughly five seconds at 640x480 and less at
+  // larger sizes, which is why the buffer is bounded by bytes and reports how
+  // many seconds it actually managed.
+  prerollInit(1536 * 1024);
+  prerollSetWindow(cfg.prerollSeconds);
   motionInit();
   motionSetSensitivity(cfg.motionSensitivity);
 

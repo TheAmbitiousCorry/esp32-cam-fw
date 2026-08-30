@@ -27,3 +27,6 @@ uint8_t motionSensitivity();
 // How much of the scene changed on the last frame checked, as a percentage.
 // Reported so sensitivity can be set from what the camera actually sees.
 uint8_t motionLastChange();
+
+// Whether motion recording is enabled and inside its schedule right now.
+bool motionArmed();

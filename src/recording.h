@@ -17,7 +17,36 @@
 // Capture runs from the main loop rather than a task. Writing to SD and reading
 // from the camera both want the same PSRAM bandwidth, and serialising them keeps
 // the failure modes obvious while the throughput is still unknown.
+// Keeps the most recent frames in PSRAM so a recording can begin before its
+// trigger. A camera that starts when it sees motion has already missed the
+// approach, which is usually the part worth having.
+//
+// Sized in bytes rather than frames, because a frame is 17KB at 400x296 and
+// 54KB at 800x600, and a fixed frame count would mean a wildly different amount
+// of history depending on an unrelated setting.
+void prerollInit(size_t bytes);
+
+// Frames older than this are dropped, so the setting means what it says. The
+// buffer is bounded by both: whichever runs out first, seconds or bytes.
+void prerollSetWindow(uint32_t seconds);
+void prerollPush(const camera_fb_t *fb);
+uint32_t prerollFrames();
+uint32_t prerollSeconds();
+
 bool recordingStart(uint32_t seconds);
+
+// Pushes the stop time out to `quietSeconds` from now. Called while something is
+// still happening, so a recording lasts as long as the event rather than a fixed
+// span decided in advance.
+void recordingExtend(uint32_t quietSeconds);
+
+// Called for each captured frame while recording. Returning true extends the
+// recording. Set to nullptr for a fixed length.
+void recordingSetActivityCheck(bool (*fn)(camera_fb_t *fb), uint32_t quietSeconds);
+
+// Whether the current recording was started by motion rather than by hand.
+bool recordingWasTriggered();
+void recordingMarkTriggered();
 void recordingStop();
 void recordingTick();
 

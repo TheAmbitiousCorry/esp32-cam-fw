@@ -86,6 +86,8 @@ bool configLoad(Config &out) {
   out.motionEnabled = prefs.getBool("moten", false);
   out.motionSensitivity = prefs.getUChar("motsens", 20);
   out.recordSeconds = prefs.getUChar("recsec", 10);
+  out.prerollSeconds = prefs.getUChar("presec", 5);
+  out.quietSeconds = prefs.getUChar("quietsec", 5);
   out.frameSize = prefs.getUChar("fsize", (uint8_t)FRAMESIZE_SVGA);
   out.jpegQuality = prefs.getUChar("jq", 12);
   out.keepFreeMb = prefs.getUShort("keepfree", 512);
@@ -120,6 +122,8 @@ bool configSave(const Config &cfg) {
   prefs.putBool("moten", cfg.motionEnabled);
   prefs.putUChar("motsens", cfg.motionSensitivity);
   prefs.putUChar("recsec", cfg.recordSeconds);
+  prefs.putUChar("presec", cfg.prerollSeconds);
+  prefs.putUChar("quietsec", cfg.quietSeconds);
   prefs.putUChar("fsize", cfg.frameSize);
   prefs.putUChar("jq", cfg.jpegQuality);
   prefs.putUShort("keepfree", cfg.keepFreeMb);

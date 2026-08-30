@@ -12,7 +12,12 @@ static constexpr int XCLK_HZ = 20000000;
 // black or blown out, which reads as a dead sensor if you trust it.
 static constexpr int WARMUP_FRAMES = 4;
 
-bool cameraInit() {
+static bool cameraReady = false;
+
+// Power-down is asserted between attempts. A sensor that did not answer may be
+// mid-way through its own power-up, and cycling it is more likely to help than
+// asking the same question faster.
+static bool cameraTry() {
   camera_config_t cfg = {};
 
   cfg.pin_pwdn     = PWDN_GPIO_NUM;
@@ -69,6 +74,37 @@ bool cameraInit() {
   }
   return true;
 }
+
+static constexpr int INIT_ATTEMPTS = 3;
+
+bool cameraInit() {
+  for (int attempt = 1; attempt <= INIT_ATTEMPTS; attempt++) {
+    if (cameraTry()) {
+      if (attempt > 1) Serial.printf("camera came up on attempt %d\n", attempt);
+      cameraReady = true;
+      return true;
+    }
+    if (attempt < INIT_ATTEMPTS) {
+      Serial.printf("camera attempt %d failed, power cycling the sensor\n", attempt);
+      esp_camera_deinit();
+      pinMode(PWDN_GPIO_NUM, OUTPUT);
+      digitalWrite(PWDN_GPIO_NUM, HIGH);  // asserted: sensor powered down
+      delay(150);
+      digitalWrite(PWDN_GPIO_NUM, LOW);
+      delay(150);
+    }
+  }
+  cameraReady = false;
+  return false;
+}
+
+bool cameraRetry() {
+  esp_camera_deinit();
+  cameraReady = false;
+  return cameraInit();
+}
+
+bool cameraIsReady() { return cameraReady; }
 
 bool isCompleteJpeg(const camera_fb_t *fb) {
   if (fb->len < 4) return false;

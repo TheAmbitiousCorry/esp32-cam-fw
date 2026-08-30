@@ -694,6 +694,20 @@ static esp_err_t benchHandler(httpd_req_t *req) {
   return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
 }
 
+// Clears an intermittent sensor fault without a reboot, which matters once the
+// camera is mounted somewhere awkward.
+static esp_err_t cameraRetryHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+  const bool ok = cameraRetry();
+  cameraAvailable = ok;
+  return sendShell(req, "/status",
+                   String("<h1>Camera</h1><p class=") + (ok ? "sub" : "err") + ">" +
+                       (ok ? "Sensor detected. Live view should work now."
+                           : "Sensor still not responding after three attempts.") +
+                       "</p><div class=actions><a class=btn href=\"/status\">Status</a>"
+                       "</div>");
+}
+
 static esp_err_t restartHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   const esp_err_t res = sendShell(req, "/status",
@@ -1043,6 +1057,7 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t restart = {"/restart",  HTTP_GET,  restartHandler,      nullptr};
   httpd_uri_t bench   = {"/sdbench",  HTTP_GET,  benchHandler,        nullptr};
   httpd_uri_t play    = {"/play",     HTTP_GET,  playPageHandler,     nullptr};
+  httpd_uri_t retrycam = {"/retrycam", HTTP_GET, cameraRetryHandler,  nullptr};
   httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};
   httpd_uri_t filesdel = {"/files",   HTTP_POST, filesDeleteHandler,  nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
@@ -1080,6 +1095,7 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &restart);
   registerUri(pageServer, &bench);
   registerUri(pageServer, &play);
+  registerUri(pageServer, &retrycam);
   registerUri(pageServer, &files);
   registerUri(pageServer, &filesdel);
   registerUri(pageServer, &capture);

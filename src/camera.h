@@ -2,7 +2,16 @@
 
 #include "esp_camera.h"
 
+// Retries on failure. The sensor probe over SCCB fails intermittently on this
+// board, on identical firmware, roughly half of boots. A retry costs a few
+// hundred milliseconds; a failed boot costs the camera until someone notices.
 bool cameraInit();
+
+// Tears the driver down and brings it back. Lets a fault be cleared from the
+// web interface without a reboot, which matters when the camera is mounted.
+bool cameraRetry();
+
+bool cameraIsReady();
 
 // A DMA transfer cut short still returns a buffer with a plausible length. The
 // start and end of image markers distinguish a whole frame from a partial one.

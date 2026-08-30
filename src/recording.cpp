@@ -13,6 +13,13 @@ static constexpr char REC_ROOT[] = "/rec";
 static constexpr uint32_t MIN_FRAME_INTERVAL_MS = 40;
 
 static bool active = false;
+
+// A recording this camera cannot write. There is no usable card, so the trigger
+// is reported and nothing is stored here: the aggregator holds this camera's
+// stream already and records from it instead. The camera still keeps time, so a
+// clip made on its behalf starts and ends where its own would have.
+static bool cardless = false;
+
 static String dir;
 static uint32_t startedAt = 0;
 static uint32_t stopAt = 0;
@@ -192,7 +199,22 @@ bool recordingStart(uint32_t seconds) {
   // timer because this is the moment it matters, and it costs nothing when the
   // card was there all along.
   if (!sdMounted() || !sdWritable()) {
-    if (!sdRemount()) return false;
+    if (!sdRemount()) {
+      // Say that this is happening rather than refusing. A camera that cannot
+      // write is still a camera that saw something, and the only way anything
+      // keeps that footage is for it to report the event while it is happening.
+      cardless = true;
+      active = true;
+      triggered = false;
+      startedAt = millis();
+      stopAt = startedAt + seconds * 1000;
+      frames = 0;
+      bytes = 0;
+      dir = "";
+      Serial.printf("no card: reporting a %lus recording for whoever is "
+                    "watching to keep\n", (unsigned long)seconds);
+      return true;
+    }
     Serial.println("recording: the card came back after a remount");
   }
 
@@ -260,6 +282,12 @@ bool recordingStart(uint32_t seconds) {
 void recordingStop() {
   if (!active) return;
   active = false;
+  if (cardless) {
+    cardless = false;
+    Serial.printf("no-card recording ended after %.1fs\n",
+                  (millis() - startedAt) / 1000.0f);
+    return;
+  }
   if (videoFile) videoFile.close();
   if (indexFile) indexFile.close();
   const uint32_t durMs = millis() - startedAt;
@@ -293,6 +321,10 @@ void recordingTick() {
     recordingStop();
     return;
   }
+  // With no card there is nothing to write and no reason to take frames. The
+  // camera stays free for the stream the aggregator is recording from, which is
+  // the only copy this event will have.
+  if (cardless) return;
   if (millis() - lastFrameAt < MIN_FRAME_INTERVAL_MS) return;
   lastFrameAt = millis();
 
@@ -362,6 +394,13 @@ void recordingTick() {
 }
 
 bool recordingActive() { return active; }
+bool recordingCardless() { return cardless; }
+
+// The recorder owns the camera only when it is actually taking frames. A
+// cardless recording is active without owning anything, and a viewer waiting on
+// a published frame that will never arrive is a stream that stops for as long
+// as the recording lasts.
+bool recordingOwnsCamera() { return active && !cardless; }
 String recordingDir() { return dir; }
 uint32_t recordingFrames() { return frames; }
 uint32_t recordingBytes() { return bytes; }

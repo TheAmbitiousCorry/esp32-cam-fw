@@ -630,6 +630,25 @@ void loop() {
   ensureWifi();
   ArduinoOTA.handle();
 
+  // A sensor that failed at boot is not a sensor that is broken. This one comes
+  // up about half the time and works the moment it is asked again, which was
+  // only ever going to happen if somebody noticed and pressed a button. Every
+  // half minute costs nothing when the camera is working, since it is skipped
+  // entirely, and turns a dead camera into one that fixes itself.
+  static uint32_t lastCameraRetry = 0;
+  if (!cameraReady && !portalMode && !otaInProgress &&
+      millis() - lastCameraRetry > 30000) {
+    lastCameraRetry = millis();
+    Serial.println("camera is not delivering frames, trying it again");
+    cameraReady = cameraRetry();
+    if (cameraReady) {
+      Serial.println("camera recovered");
+      cameraApplySettings(cfg.frameSize, cfg.jpegQuality);
+      cameraApplyImage(imageFromConfig());
+      statusLedSet(Status::Online);
+    }
+  }
+
   static unsigned long lastReport = 0;
   if (millis() - lastReport > 15000) {
     lastReport = millis();

@@ -51,6 +51,16 @@ void recordingStop();
 void recordingTick();
 
 bool recordingActive();
+
+// True while a recording is running that this camera cannot write, because
+// there is no usable card. The event is reported so whoever holds this camera's
+// stream can keep it; nothing is stored here.
+bool recordingCardless();
+
+// True while the recorder is taking frames of its own. Anything that reads the
+// recorder's published frame must ask this rather than recordingActive(), since
+// a cardless recording publishes nothing.
+bool recordingOwnsCamera();
 String recordingDir();
 uint32_t recordingFrames();
 uint32_t recordingBytes();

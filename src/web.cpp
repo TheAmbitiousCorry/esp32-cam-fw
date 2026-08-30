@@ -10,6 +10,7 @@
 
 #include "auth.h"
 #include "camera.h"
+#include "clock.h"
 #include "config.h"
 #include "portal.h"
 #include "recording.h"
@@ -28,6 +29,44 @@ static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u
 // Cached at startup so page requests do not each hit NVS for a value that only
 // changes when the camera is reconfigured and rebooted.
 static String queryParam(httpd_req_t *req, const char *key, const String &fallback);
+
+// Inline SVG rather than an icon font or image files: nothing extra to serve,
+// nothing to fetch, and they inherit the surrounding text colour.
+static String icon(const char *name) {
+  const char *d = nullptr;
+  if (!strcmp(name, "camera"))
+    d = "<path d='M2 6h3l1-2h6l1 2h3v9H2z'/><circle cx='8' cy='10' r='3'/>";
+  else if (!strcmp(name, "folder"))
+    d = "<path d='M2 4h4l1.5 2H14v8H2z'/>";
+  else if (!strcmp(name, "gauge"))
+    d = "<circle cx='8' cy='8' r='6'/><path d='M8 8l3-2.5'/>";
+  else if (!strcmp(name, "cog"))
+    d = "<circle cx='8' cy='8' r='2.5'/><path d='M8 1v2M8 13v2M1 8h2M13 8h2"
+        "M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13'/>";
+  else if (!strcmp(name, "chip"))
+    d = "<rect x='4' y='4' width='8' height='8' rx='1'/><path d='M6 1v3M10 1v3"
+        "M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3'/>";
+  else if (!strcmp(name, "exit"))
+    d = "<path d='M6 2H2v12h4M10 5l3 3-3 3M13 8H6'/>";
+  else if (!strcmp(name, "play"))
+    d = "<path d='M5 3l8 5-8 5z'/>";
+  else if (!strcmp(name, "trash"))
+    d = "<path d='M3 4h10M6 4V2h4v2M4 4l1 10h6l1-10'/>";
+  else if (!strcmp(name, "bolt"))
+    d = "<path d='M9 1L4 9h3l-1 6 5-8H8z'/>";
+  else if (!strcmp(name, "dot"))
+    d = "<circle cx='8' cy='8' r='4'/>";
+  else if (!strcmp(name, "image"))
+    d = "<rect x='2' y='3' width='12' height='10' rx='1'/><path d='M2 11l3-3 3 3 3-3 3 3'/>";
+  else if (!strcmp(name, "up"))
+    d = "<path d='M8 13V3M4 7l4-4 4 4'/>";
+  else
+    return "";
+
+  return String("<svg viewBox='0 0 16 16' width='15' height='15' fill='none' "
+                "stroke='currentColor' stroke-width='1.4' stroke-linecap='round' "
+                "stroke-linejoin='round' aria-hidden='true'>") + d + "</svg>";
+}
 
 static String cameraName = "camera";
 static bool cameraAvailable = false;
@@ -56,8 +95,12 @@ static const char SHARED_CSS[] =
     "padding:18px 0;display:flex;flex-direction:column;gap:2px}"
     ".brand{padding:0 18px 16px;font-weight:600;font-size:15px;color:#fff;"
     "overflow-wrap:anywhere}"
-    "aside a{display:block;padding:9px 18px;color:#aaa;text-decoration:none;font-size:14px;"
-    "border-left:3px solid transparent}"
+    "aside a{display:flex;align-items:center;gap:10px;padding:9px 18px;color:#aaa;"
+    "text-decoration:none;font-size:14px;border-left:3px solid transparent}"
+    "aside a svg{flex:0 0 15px;opacity:.75}"
+    "aside a.on svg{opacity:1}"
+    "button svg,.btn svg{vertical-align:-2px;margin-right:6px}"
+    "td svg,th svg{vertical-align:-2px;margin-right:6px;opacity:.7}"
     "aside a:hover{background:#1f1f1f;color:#eee}"
     "aside a.on{color:#fff;background:#1f1f1f;border-left-color:#2a7}"
     "aside .spacer{flex:1}"
@@ -119,18 +162,20 @@ static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
 
 // Every signed-in page shares the sidebar; `active` marks the current entry.
 static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &main) {
-  struct Item { const char *href; const char *label; };
+  struct Item { const char *href; const char *label; const char *icon; };
   static const Item items[] = {
-      {"/", "Live view"}, {"/files", "Files"}, {"/status", "Status"},
-      {"/settings", "Settings"}, {"/update", "Firmware"}};
+      {"/", "Live view", "camera"}, {"/files", "Files", "folder"},
+      {"/status", "Status", "gauge"}, {"/settings", "Settings", "cog"},
+      {"/update", "Firmware", "chip"}};
 
   String nav = "<div class=app><aside><div class=brand>" + htmlEscape(cameraName) + "</div>";
   for (const Item &it : items) {
     nav += String("<a href=\"") + it.href + "\"";
     if (strcmp(it.href, active) == 0) nav += " class=on";
-    nav += ">" + String(it.label) + "</a>";
+    nav += ">" + icon(it.icon) + "<span>" + String(it.label) + "</span></a>";
   }
-  nav += "<div class=spacer></div><a href=\"/logout\">Sign out</a></aside><main>";
+  nav += "<div class=spacer></div><a href=\"/logout\">" + icon("exit") +
+         "<span>Sign out</span></a></aside><main>";
   return sendHtml(req, nav + main + "</main></div>");
 }
 
@@ -241,11 +286,13 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   }
 
   String body = "<h1>Live view</h1><div class=actions>";
-  body += String("<button id=flash class=\"") + (flashIsOn() ? "on" : "") + "\">Flash "
-          + (flashIsOn() ? "on" : "off") + "</button>";
-  body += "<a class=btn href=\"/capture\" target=_blank>Still image</a>";
+  body += String("<button id=flash class=\"") + (flashIsOn() ? "on" : "") + "\">" +
+          icon("bolt") + "Flash " + (flashIsOn() ? "on" : "off") + "</button>";
+  body += "<a class=btn href=\"/capture\" target=_blank>" + icon("image") +
+          "Still image</a>";
   body += String("<button id=rec class=\"") + (recordingActive() ? "on" : "") + "\">" +
-          (recordingActive() ? "Recording..." : "Record 10s") + "</button></div>";
+          icon("dot") + (recordingActive() ? "Recording..." : "Record 10s") +
+          "</button></div>";
   body += INDEX_BODY;
   return sendShell(req, "/", body);
 }
@@ -472,6 +519,7 @@ static esp_err_t statusHandler(httpd_req_t *req) {
     body += "<tr><th>" + String(k) + "</th><td>" + htmlEscape(v) + "</td></tr>";
   };
   row("Camera sensor", cameraAvailable ? "detected" : "NOT DETECTED");
+  row("Time", clockNow());
   row("Uptime", humanUptime());
   const bool online = WiFi.status() == WL_CONNECTED;
   row("Network", online ? WiFi.SSID() : String("disconnected"));
@@ -563,6 +611,25 @@ static esp_err_t sendSettings(httpd_req_t *req, const String &notice) {
           "back on.</small>";
   body += "<label>Firmware update password</label><input name=otapw value=\"" +
           htmlEscape(stored.otaPassword) + "\" required>";
+  body += "<label>Timezone</label>"
+          "<select id=tzlist style=\"margin-bottom:6px\">"
+          "<option value=''>Choose a zone...</option>"
+          "<option value='UTC0'>UTC</option>"
+          "<option value='SAST-2'>South Africa</option>"
+          "<option value='GMT0BST,M3.5.0/1,M10.5.0'>United Kingdom</option>"
+          "<option value='CET-1CEST,M3.5.0,M10.5.0/3'>Central Europe</option>"
+          "<option value='EET-2EEST,M3.5.0/3,M10.5.0/4'>Eastern Europe</option>"
+          "<option value='EST5EDT,M3.2.0,M11.1.0'>US Eastern</option>"
+          "<option value='CST6CDT,M3.2.0,M11.1.0'>US Central</option>"
+          "<option value='PST8PDT,M3.2.0,M11.1.0'>US Pacific</option>"
+          "<option value='IST-5:30'>India</option>"
+          "<option value='JST-9'>Japan</option>"
+          "<option value='AEST-10AEDT,M10.1.0,M4.1.0/3'>Australia Eastern</option>"
+          "</select>"
+          "<input name=tz id=tz value=\"" + htmlEscape(stored.timezone) + "\" "
+          "placeholder='UTC0'>";
+  body += "<small class=sub>A POSIX timezone string. Pick one above to fill it in, "
+          "or type your own. Recordings are named from this clock.</small>";
   body += String("<label><input type=checkbox name=apwin value=1 style=\"width:auto\"") +
           (stored.apWindow ? " checked" : "") +
           "> Open a setup access point for 15 minutes after each restart</label>";
@@ -576,6 +643,10 @@ static esp_err_t sendSettings(httpd_req_t *req, const String &notice) {
   body += "<div class=actions><button type=submit class=primary>Save and restart"
           "</button></div></form>";
   body += R"HTML(<script>
+const tzl = document.getElementById('tzlist');
+const tzb = document.getElementById('tz');
+if (tzl) tzl.onchange = () => { if (tzl.value) tzb.value = tzl.value; };
+
 const list = document.getElementById('scanlist');
 const box = document.getElementById('ssid');
 // Selecting from the list fills the text box rather than replacing it, so a
@@ -711,9 +782,10 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   body += "<form method=post action=/files><table>";
   for (int i = 0; i < shown; i++) {
     const String size = entries[i].isDir
-                            ? String("directory")
+                            ? String("")
                             : String((uint32_t)(entries[i].size / 1024)) + " KB";
-    String label = htmlEscape(entries[i].name);
+    String label = icon(entries[i].isDir ? "folder" : "image") +
+                   htmlEscape(entries[i].name);
     if (entries[i].isDir) {
       label = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + label + "</a>";
     }
@@ -721,7 +793,8 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     String extra;
     // A directory holding a video file is a recording, so offer to play it.
     if (entries[i].isDir && sdExists(entries[i].path + "/video.mjpeg")) {
-      extra = " <a href=\"/play?dir=" + htmlEscape(entries[i].path) + "\">play</a>";
+      extra = " <a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
+              htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a>";
     }
 
     body += "<tr><td style=\"padding-right:12px\">"
@@ -736,7 +809,8 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   }
   body += "<div class=actions>"
           "<button type=button id=all>Select all</button>"
-          "<button type=submit id=del>Delete selected</button></div></form>";
+          "<button type=submit id=del>" + icon("trash") +
+          "Delete selected</button></div></form>";
 
   body += R"HTML(<script>
 const boxes = () => [...document.querySelectorAll('input[name=f]')];
@@ -822,6 +896,7 @@ static esp_err_t settingsPostHandler(httpd_req_t *req) {
   stored.otaPassword = otapw;
   stored.wifiSsid = ssid;
   stored.apWindow = !formField(body, "apwin").isEmpty();
+  stored.timezone = formField(body, "tz");
   // Blank means unchanged: echoing a stored password back into a form only to
   // have it submitted again is a good way to lose it to a typo.
   if (!wifipass.isEmpty()) stored.wifiPass = wifipass;
@@ -1024,13 +1099,4 @@ bool startWebServers(bool cameraOk) {
   return true;
 }
 
-void stopWebServers() {
-  if (streamServer) {
-    httpd_stop(streamServer);
-    streamServer = nullptr;
-  }
-  if (pageServer) {
-    httpd_stop(pageServer);
-    pageServer = nullptr;
-  }
-}
+void webBeginUpdate() { updating = true; }

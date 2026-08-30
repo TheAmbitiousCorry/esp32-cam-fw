@@ -6,6 +6,7 @@
 #include "mbedtls/base64.h"
 
 #include "camera.h"
+#include "clock.h"
 #include "config.h"
 #include "portal.h"
 #include "recording.h"
@@ -142,10 +143,9 @@ static void startOta() {
 
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
-    Serial.println("\nOTA starting, shutting down camera and servers");
-    stopWebServers();
-    serversStarted = false;
-    esp_camera_deinit();
+    Serial.println("\nOTA starting, asking any stream to release the camera");
+    webBeginUpdate();
+    delay(400);
   });
   ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
     static int lastPct = -1;
@@ -211,6 +211,9 @@ static void ensureWifi() {
       // Opened only once the servers exist, so anyone joining it has something
       // to reach. Skipped entirely when the setting is off.
       if (cfg.apWindow) startApWindow();
+
+      // Needs the network, so it starts here rather than in setup().
+      clockBegin(cfg.timezone);
       statusLedSet(cameraReady ? Status::Online : Status::CameraFault);
       if (onTrial) {
         // Reaching the network with the servers answering is the only property

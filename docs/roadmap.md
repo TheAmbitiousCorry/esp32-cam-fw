@@ -21,11 +21,6 @@ Domain tags are provisional: no spec directory exists yet.
   differencing, a PIR sensor, or both. Why now: it is the point of the project, and
   everything after it is refinement. Domains: motion, camera, storage. Appetite: large.
 
-- **Recordings carry a real timestamp**: files named by an uptime counter cannot be
-  reviewed after an event. Why now: it changes the file naming and directory
-  layout, which is expensive to migrate once there is footage on the card.
-  Domains: storage, network. Appetite: small.
-
 - **A full card ages out old footage on its own**: manual deletion covers the
   card being full today; it does not cover the camera filling it again unattended
   at 3am. Why now: the retention rule is cheap to decide while the file layout is

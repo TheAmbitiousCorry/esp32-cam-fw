@@ -21,6 +21,11 @@ struct Config {
   // it: the access point is up for a fixed time and then closes on its own.
   // Covers a Wi-Fi password that changed, without leaving an AP broadcasting
   // permanently.
+  // POSIX TZ string, for example "SAST-2" or "GMT0BST,M3.5.0/1,M10.5.0". Empty
+  // means UTC. Stored rather than an offset so daylight saving is handled by
+  // the C library instead of by us.
+  String timezone;
+
   bool apWindow = true;
   bool configured = false;
 };

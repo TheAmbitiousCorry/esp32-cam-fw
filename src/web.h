@@ -14,5 +14,7 @@ void webSetReconnects(uint32_t n);
 // actually registered rather than leaving it to be guessed at.
 void webSetBootPress(int presses, int needed);
 
-// Frees both servers so an OTA write is not competing with a live stream.
-void stopWebServers();
+// Signals any running stream to release the camera before firmware is written.
+// Does not stop the servers: a handler that loops until its client disconnects
+// cannot be stopped from outside, and httpd_stop() waits for it forever.
+void webBeginUpdate();

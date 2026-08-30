@@ -1,6 +1,7 @@
 #include <SD_MMC.h>
 
 #include "camera.h"
+#include "clock.h"
 #include "recording.h"
 #include "storage.h"
 
@@ -59,8 +60,15 @@ bool recordingStart(uint32_t seconds) {
     return false;
   }
 
-  char name[32];
-  snprintf(name, sizeof(name), "%s/%lu", REC_ROOT, (unsigned long)nextRecordingNumber());
+  // A timestamp names the recording after when it happened and sorts
+  // chronologically as text. A counter says nothing about either, so it is only
+  // the fallback for a camera that has not reached an NTP server yet.
+  char name[48];
+  if (clockSynced()) {
+    snprintf(name, sizeof(name), "%s/%s", REC_ROOT, clockStamp().c_str());
+  } else {
+    snprintf(name, sizeof(name), "%s/%lu", REC_ROOT, (unsigned long)nextRecordingNumber());
+  }
   if (!SD_MMC.mkdir(name)) {
     Serial.printf("recording: could not create %s\n", name);
     return false;

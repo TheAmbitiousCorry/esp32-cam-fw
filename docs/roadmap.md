@@ -16,22 +16,26 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Next
 
-- **Recording starts without a human asking**: a camera that records on command is
-  not a security camera. Covers the trigger source as an open question: frame
-  differencing, a PIR sensor, or both. Why now: it is the point of the project, and
-  everything after it is refinement. Domains: motion, camera, storage. Appetite: large.
-
 - **A full card ages out old footage on its own**: manual deletion covers the
   card being full today; it does not cover the camera filling it again unattended
-  at 3am. Why now: the retention rule is cheap to decide while the file layout is
-  still being designed and awkward to bolt on afterwards. Domains: storage.
-  Appetite: small.
+  at 3am. Why now: this stopped being hypothetical when motion triggering
+  shipped. A camera that records itself can now fill 28GB without anyone asking
+  it to, and the retention rule is cheap to decide while the file layout is still
+  young. Domains: storage. Appetite: small.
 
-- **Camera settings are tunable from the settings page**: motion sensitivity,
-  frame size and exposure are the values worth changing often, and each one
-  currently costs a rebuild. Why now: the setup page in Now establishes where
-  stored settings live, so this becomes additive rather than structural.
-  Domains: config, web. Appetite: small.
+- **Motion recording only runs when it should**: a camera watching a hallway all
+  day records the household living its life, which fills the card and buries the
+  footage that matters under hours of it. Why now: the clock and motion
+  triggering both landed, so a schedule is additive rather than structural, and
+  it changes how much footage the retention rule above has to cope with.
+  Domains: motion, config, web. Appetite: small.
+
+- **Image settings are tunable without a rebuild**: motion sensitivity and
+  recording length are adjustable now; frame size, JPEG quality and exposure are
+  not, and those are what decide whether footage is usable at dawn and how much
+  card a night costs. Why now: both test frames so far were badly exposed, and
+  changing any of these currently means a build and a flash.
+  Domains: config, camera, web. Appetite: small.
 
 - **Someone finds out an event happened without opening the web page**: an
   unwatched camera that only stores footage is a recorder, not an alarm. Delivery

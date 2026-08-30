@@ -165,7 +165,7 @@ static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
 static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &main) {
   struct Item { const char *href; const char *label; const char *icon; };
   static const Item items[] = {
-      {"/", "Live view", "camera"}, {"/recordings", "Recordings", "dot"},
+      {"/", "Live view", "camera"}, {"/recording", "Recording", "dot"},
       {"/files", "Files", "folder"},
       {"/status", "Status", "gauge"}, {"/settings", "Settings", "cog"},
       {"/update", "Firmware", "chip"}};
@@ -435,10 +435,11 @@ static esp_err_t recIndexHandler(httpd_req_t *req) {
 
   uint32_t offset = 0, length = 0, atMs = 0;
   bool first = true;
-  char piece[24];
+  char piece[48];
   while (sdIndexNext(index, &offset, &length, &atMs)) {
-    const int n = snprintf(piece, sizeof(piece), "%s%lu", first ? "" : ",",
-                           (unsigned long)atMs);
+    const int n = snprintf(piece, sizeof(piece), "%s[%lu,%lu,%lu]", first ? "" : ",",
+                           (unsigned long)atMs, (unsigned long)offset,
+                           (unsigned long)length);
     httpd_resp_send_chunk(req, piece, n);
     first = false;
   }
@@ -449,35 +450,20 @@ static esp_err_t recIndexHandler(httpd_req_t *req) {
   return ESP_OK;
 }
 
-// One frame by number, so the player can jump anywhere rather than only forward.
+// Reads a frame at the offset the client supplies. The client has the index
+// already, so making the server walk it again cost 360ms for the first frame and
+// 1384ms for the hundredth, which is what made scrubbing feel stuck.
 static esp_err_t frameHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
 
   const String dir = queryParam(req, "dir", "");
-  const int wanted = queryParam(req, "n", "0").toInt();
-  if (!sdPathIsSafe(dir) || wanted < 0 || !sdExists(dir + "/index.txt")) {
-    httpd_resp_set_status(req, "404 Not Found");
-    return httpd_resp_send(req, "no such frame", HTTPD_RESP_USE_STRLEN);
-  }
+  const long offset = queryParam(req, "off", "-1").toInt();
+  const long length = queryParam(req, "len", "0").toInt();
 
-  void *index = nullptr;
-  if (!sdIndexOpen(dir + "/index.txt", &index)) return httpd_resp_send_500(req);
-
-  // Walking the index is O(n) in the frame number. For a few hundred frames of
-  // twenty-byte lines that is cheaper than holding a parsed index in memory.
-  uint32_t offset = 0, length = 0, atMs = 0;
-  bool found = false;
-  for (int i = 0; sdIndexNext(index, &offset, &length, &atMs); i++) {
-    if (i == wanted) {
-      found = true;
-      break;
-    }
-  }
-  sdIndexClose(index);
-
-  if (!found || length == 0 || length > 200 * 1024) {
-    httpd_resp_set_status(req, "404 Not Found");
-    return httpd_resp_send(req, "no such frame", HTTPD_RESP_USE_STRLEN);
+  if (!sdPathIsSafe(dir) || offset < 0 || length <= 0 || length > 200 * 1024 ||
+      !sdExists(dir + "/video.mjpeg")) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    return httpd_resp_send(req, "bad frame request", HTTPD_RESP_USE_STRLEN);
   }
 
   void *video = nullptr;
@@ -488,8 +474,14 @@ static esp_err_t frameHandler(httpd_req_t *req) {
     sdCloseRead(video);
     return httpd_resp_send_500(req);
   }
-  const size_t got = sdReadAt(video, offset, buf, length);
+  const size_t got = sdReadAt(video, (uint32_t)offset, buf, (size_t)length);
   sdCloseRead(video);
+
+  if (got == 0) {
+    free(buf);
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "no frame there", HTTPD_RESP_USE_STRLEN);
+  }
 
   httpd_resp_set_type(req, "image/jpeg");
   const esp_err_t res = httpd_resp_send(req, (const char *)buf, got);
@@ -511,38 +503,65 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
   body += "<div class=actions>"
           "<button id=pp class=primary>" + icon("play") + "Play</button>"
           "<span id=pos class=sub style=\"align-self:center\"></span>"
-          "<a class=btn href=\"/recordings\">Back</a></div>";
+          "<a class=btn href=\"/files?path=/rec\">Back</a></div>";
   body += "<script>const DIR='" + dir + "';</script>";
   body += R"HTML(<script>
 const img = document.getElementById('p');
 const bar = document.getElementById('scrub');
 const pos = document.getElementById('pos');
 const pp  = document.getElementById('pp');
-let times = [], at = 0, timer = null;
+
+// Each entry is [timestampMs, byteOffset, byteLength]. Holding the offsets here
+// means a seek is one read on the device rather than a walk through the index.
+let idx = [], at = 0, timer = null;
+
+// One request in flight at a time, with the newest target winning. Dragging a
+// slider otherwise queues a request per tick, each waiting behind the last, and
+// the picture ends up permanently behind the handle.
+let inFlight = false, wanted = null;
+
+const label = n => {
+  pos.textContent = (idx[n][0] / 1000).toFixed(1) + 's  /  ' +
+                    (idx[idx.length - 1][0] / 1000).toFixed(1) + 's   frame ' +
+                    (n + 1) + ' of ' + idx.length;
+};
+
+const load = n => {
+  wanted = n;
+  if (inFlight) return;
+  inFlight = true;
+  const target = wanted;
+  wanted = null;
+  img.src = '/frame?dir=' + encodeURIComponent(DIR) +
+            '&off=' + idx[target][1] + '&len=' + idx[target][2];
+  label(target);
+};
+
+const settled = () => {
+  inFlight = false;
+  if (wanted !== null) load(wanted);
+};
+img.onload = settled;
+img.onerror = settled;
 
 const show = n => {
-  at = Math.max(0, Math.min(n, times.length - 1));
+  at = Math.max(0, Math.min(n, idx.length - 1));
   bar.value = at;
-  img.src = '/frame?dir=' + encodeURIComponent(DIR) + '&n=' + at;
-  pos.textContent = (times[at] / 1000).toFixed(1) + 's  /  ' +
-                    (times[times.length - 1] / 1000).toFixed(1) + 's   frame ' +
-                    (at + 1) + ' of ' + times.length;
+  load(at);
 };
 
 const stop = () => { clearTimeout(timer); timer = null; pp.textContent = 'Play'; };
 
-// Steps using the recorded gaps, so playback runs at the speed it was captured
-// rather than as fast as frames arrive.
 const step = () => {
-  if (at >= times.length - 1) { stop(); return; }
-  const gap = times[at + 1] - times[at];
+  if (at >= idx.length - 1) { stop(); return; }
+  const gap = idx[at + 1][0] - idx[at][0];
   show(at + 1);
   timer = setTimeout(step, Math.max(gap, 20));
 };
 
 pp.onclick = () => {
   if (timer) { stop(); return; }
-  if (at >= times.length - 1) show(0);
+  if (at >= idx.length - 1) show(0);
   pp.textContent = 'Pause';
   timer = setTimeout(step, 20);
 };
@@ -550,9 +569,9 @@ pp.onclick = () => {
 bar.oninput = () => { stop(); show(+bar.value); };
 
 (async () => {
-  times = await (await fetch('/recindex?dir=' + encodeURIComponent(DIR))).json();
-  if (!times.length) { pos.textContent = 'No frames.'; return; }
-  bar.max = times.length - 1;
+  idx = await (await fetch('/recindex?dir=' + encodeURIComponent(DIR))).json();
+  if (!idx.length) { pos.textContent = 'No frames.'; return; }
+  bar.max = idx.length - 1;
   show(0);
 })();
 </script>)HTML";
@@ -924,6 +943,72 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     return sendShell(req, "/files", body);
   }
 
+  // Inside /rec the entries are recordings, so offer a date filter and show the
+  // names as dates rather than as the strings they are stored under.
+  const bool inRecordings = (path == "/rec");
+  // Recordings are named YYYYMMDD-HHMMSS, so a text prefix match is a date
+  // filter. No parsing, and it sorts chronologically for free.
+  const String from = queryParam(req, "from", "");
+  const String fromTime = queryParam(req, "time", "");
+  String wanted;
+  if (from.length() == 10) {
+    wanted = from.substring(0, 4) + from.substring(5, 7) + from.substring(8, 10);
+    if (fromTime.length() >= 5) {
+      wanted += "-" + fromTime.substring(0, 2) + fromTime.substring(3, 5);
+    }
+  }
+
+  body += "";
+  body += "<form method=get action=/recording class=actions>"
+          "<input type=hidden name=path value=/rec>"
+          "<input type=date name=from value=\"" + htmlEscape(from) +
+          "\" style=\"width:auto\">"
+          "<input type=time name=time value=\"" + htmlEscape(fromTime) +
+          "\" style=\"width:auto\">"
+          "<button type=submit>Filter</button>"
+          "<a class=btn href=\"/files?path=/rec\">Clear</a></form>";
+
+    int matched = 0;
+  String rows;
+  for (int i = 0; i < shown; i++) {
+    if (!entries[i].isDir) continue;
+    if (wanted.length() && !entries[i].name.startsWith(wanted)) continue;
+    matched++;
+
+    // 20260830-041532 reads as a date once the punctuation is put back.
+    String when = entries[i].name;
+    if (when.length() == 15 && when[8] == '-') {
+      when = when.substring(0, 4) + "-" + when.substring(4, 6) + "-" +
+             when.substring(6, 8) + "  " + when.substring(9, 11) + ":" +
+             when.substring(11, 13) + ":" + when.substring(13, 15);
+    }
+    rows += "<tr><th>" + icon("dot") + htmlEscape(when) + "</th><td>"
+            "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
+            htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a></td></tr>";
+  }
+
+  if (matched == 0) {
+    body += "<p class=sub>" +
+            String(wanted.length() ? "Nothing recorded then." : "No recordings yet.") +
+            "</p>";
+  } else {
+    body += "<table>" + rows + "</table>";
+    if (total > shown) {
+      body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
+    }
+  }
+
+  if (inRecordings && matched >= 0) {
+    body += "<table>" + rows + "</table>";
+    if (total > shown) {
+      body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
+    }
+    body += "<form method=post action=/files><div class=actions>"
+            "<a class=btn href=\"/files?path=/\">" + icon("up") + "All files</a>"
+            "</div></form>";
+    return sendShell(req, "/files", body);
+  }
+
   body += "<form method=post action=/files><table>";
   for (int i = 0; i < shown; i++) {
     const String size = entries[i].isDir
@@ -1019,10 +1104,10 @@ static esp_err_t sendRecordings(httpd_req_t *req, const String &notice) {
   Config stored;
   configLoad(stored);
 
-  String body = "<h1>Recordings</h1>";
+  String body = "<h1>Recording</h1>";
   if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
 
-  body += "<form method=post action=/recordings style=\"max-width:340px\">";
+  body += "<form method=post action=/recording style=\"max-width:340px\">";
   body += String("<label><input type=checkbox name=moten value=1 style=\"width:auto\"") +
           (stored.motionEnabled ? " checked" : "") +
           "> Record automatically when the scene changes</label>";
@@ -1036,64 +1121,11 @@ static esp_err_t sendRecordings(httpd_req_t *req, const String &notice) {
   body += "<label>Recording length, seconds</label>"
           "<input type=number name=recsec min=2 max=120 value=" +
           String(stored.recordSeconds) + ">";
-  body += "<div class=actions><button type=submit class=primary>Save</button></div></form>";
+  body += "<div class=actions><button type=submit class=primary>Save</button>"
+          "<a class=btn href=\"/files?path=/rec\">" + icon("folder") +
+          "Saved recordings</a></div></form>";
 
-  // Recordings are named YYYYMMDD-HHMMSS, so a text prefix match is a date
-  // filter. No parsing, and it sorts chronologically for free.
-  const String from = queryParam(req, "from", "");
-  const String fromTime = queryParam(req, "time", "");
-  String wanted;
-  if (from.length() == 10) {
-    wanted = from.substring(0, 4) + from.substring(5, 7) + from.substring(8, 10);
-    if (fromTime.length() >= 5) {
-      wanted += "-" + fromTime.substring(0, 2) + fromTime.substring(3, 5);
-    }
-  }
-
-  body += "<h2 style=\"margin-top:26px\">Saved</h2>";
-  body += "<form method=get action=/recordings class=actions>"
-          "<input type=date name=from value=\"" + htmlEscape(from) +
-          "\" style=\"width:auto\">"
-          "<input type=time name=time value=\"" + htmlEscape(fromTime) +
-          "\" style=\"width:auto\">"
-          "<button type=submit>Filter</button>"
-          "<a class=btn href=\"/recordings\">Clear</a></form>";
-
-  static constexpr int MAX_LISTED = 64;
-  SdEntry entries[MAX_LISTED];
-  int total = 0;
-  const int shown = sdList("/rec", entries, MAX_LISTED, &total);
-
-  int matched = 0;
-  String rows;
-  for (int i = 0; i < shown; i++) {
-    if (!entries[i].isDir) continue;
-    if (wanted.length() && !entries[i].name.startsWith(wanted)) continue;
-    matched++;
-
-    // 20260830-041532 reads as a date once the punctuation is put back.
-    String when = entries[i].name;
-    if (when.length() == 15 && when[8] == '-') {
-      when = when.substring(0, 4) + "-" + when.substring(4, 6) + "-" +
-             when.substring(6, 8) + "  " + when.substring(9, 11) + ":" +
-             when.substring(11, 13) + ":" + when.substring(13, 15);
-    }
-    rows += "<tr><th>" + icon("dot") + htmlEscape(when) + "</th><td>"
-            "<a class=btn style=\"padding:3px 9px\" href=\"/play?dir=" +
-            htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a></td></tr>";
-  }
-
-  if (matched == 0) {
-    body += "<p class=sub>" +
-            String(wanted.length() ? "Nothing recorded then." : "No recordings yet.") +
-            "</p>";
-  } else {
-    body += "<table>" + rows + "</table>";
-    if (total > shown) {
-      body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
-    }
-  }
-  return sendShell(req, "/recordings", body);
+  return sendShell(req, "/recording", body);
 }
 
 static esp_err_t recordingsPageHandler(httpd_req_t *req) {
@@ -1299,8 +1331,8 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t bench   = {"/sdbench",  HTTP_GET,  benchHandler,        nullptr};
   httpd_uri_t play    = {"/play",     HTTP_GET,  playPageHandler,     nullptr};
   httpd_uri_t retrycam = {"/retrycam", HTTP_GET, cameraRetryHandler,  nullptr};
-  httpd_uri_t recs    = {"/recordings", HTTP_GET,  recordingsPageHandler, nullptr};
-  httpd_uri_t recspost = {"/recordings", HTTP_POST, recordingsPostHandler, nullptr};
+  httpd_uri_t recs    = {"/recording", HTTP_GET,  recordingsPageHandler, nullptr};
+  httpd_uri_t recspost = {"/recording", HTTP_POST, recordingsPostHandler, nullptr};
   httpd_uri_t recidx  = {"/recindex", HTTP_GET,  recIndexHandler,     nullptr};
   httpd_uri_t frame   = {"/frame",    HTTP_GET,  frameHandler,        nullptr};
   httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};

@@ -36,6 +36,37 @@ struct SdEntry {
 // set to the number actually present, which may exceed `max`.
 int sdListRoot(SdEntry *out, int max, int *totalFound);
 
+// Lists any directory, not just the root. Paths are rejected unless they start
+// with a slash and contain no "..", so a crafted request cannot walk outside
+// the card.
+int sdList(const String &path, SdEntry *out, int max, int *totalFound);
+bool sdPathIsSafe(const String &path);
+bool sdExists(const String &path);
+
+// Playback needs raw reads at an offset. Kept here so web.cpp never touches
+// SD_MMC directly.
+bool sdOpenRead(const String &path, void **handle);
+size_t sdReadAt(void *handle, uint32_t offset, uint8_t *out, size_t len);
+void sdCloseRead(void *handle);
+
+// Reads one line of an index file. Returns false at end of file.
+bool sdIndexOpen(const String &path, void **handle);
+bool sdIndexNext(void *handle, uint32_t *offset, uint32_t *length, uint32_t *atMs);
+void sdIndexClose(void *handle);
+
 // Removes a file, or a directory and everything under it. Recursion is depth
 // limited: a corrupt filesystem should fail a delete, not exhaust the stack.
 bool sdRemove(const String &path);
+
+// Writes the same number of bytes two ways, many small files against one large
+// one, and reports how long each took. Answers whether per-file overhead or raw
+// throughput is what limits recording, rather than leaving it to inference.
+struct SdBench {
+  uint32_t manyFilesMs;
+  uint32_t oneFileMs;
+  uint32_t bytesEach;
+  int fileCount;
+  bool ok;
+};
+
+SdBench sdBenchmark();

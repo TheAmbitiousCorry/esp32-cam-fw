@@ -43,7 +43,11 @@ bool cameraInit() {
   cfg.frame_size   = FRAMESIZE_SVGA;
   cfg.jpeg_quality = 12;
 
-  cfg.fb_count    = 2;
+  // Three, not two. With two, a stream holding one buffer while it sends over
+  // Wi-Fi leaves a single buffer for everyone else, and a recorder competing for
+  // it waits seconds rather than milliseconds. Each buffer costs about 90KB of
+  // PSRAM, of which there is 4MB.
+  cfg.fb_count    = 3;
   cfg.fb_location = CAMERA_FB_IN_PSRAM;
 
   // Drop stale frames rather than queueing them. For a live view, current beats

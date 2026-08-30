@@ -438,5 +438,8 @@ void loop() {
                   millis() / 1000, ESP.getFreeHeap(), ESP.getFreePsram(), reconnectCount,
                   WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "DOWN");
   }
-  delay(50);
+  // The loop pace sets the recording ceiling: recordingTick() runs once per
+  // iteration, so a fixed 50ms delay caps recording at 20 fps however fast the
+  // card is. Idle, a slower loop costs nothing and leaves the CPU alone.
+  delay(recordingActive() ? 1 : 50);
 }

@@ -27,6 +27,8 @@ static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u
 
 // Cached at startup so page requests do not each hit NVS for a value that only
 // changes when the camera is reconfigured and rebooted.
+static String queryParam(httpd_req_t *req, const char *key, const String &fallback);
+
 static String cameraName = "camera";
 static bool cameraAvailable = false;
 static uint32_t reconnectTally = 0;
@@ -195,8 +197,25 @@ static esp_err_t logoutHandler(httpd_req_t *req) {
 static const char INDEX_BODY[] = R"HTML(<img id="v" alt="live view">
 <script>
 const rb = document.getElementById('rec');
+let recPoll = null;
+
+async function refreshRec() {
+  const s = await (await fetch('/record')).json();
+  if (s.active) {
+    rb.textContent = 'Recording  ' + s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps';
+    rb.className = 'on';
+  } else {
+    rb.textContent = 'Record 10s';
+    rb.className = '';
+    clearInterval(recPoll);
+    recPoll = null;
+  }
+}
+
 if (rb) rb.onclick = async () => {
-  rb.textContent = (await (await fetch('/record', {method: 'POST'})).text());
+  await fetch('/record', {method: 'POST'});
+  if (!recPoll) recPoll = setInterval(refreshRec, 1000);
+  refreshRec();
 };
 
 const fb = document.getElementById('flash');
@@ -233,6 +252,23 @@ static esp_err_t indexHandler(httpd_req_t *req) {
 
 // Toggles rather than taking a state, so the button cannot disagree with the
 // device when two browsers are open on the same camera.
+// Lets the button reflect what the device is doing rather than what it was told
+// to do. Without it the label reads "Recording..." indefinitely.
+static esp_err_t recordStateHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+  char out[200];
+  uint32_t grab = 0, write = 0, index = 0;
+  recordingTiming(&grab, &write, &index);
+  snprintf(out, sizeof(out),
+           "{\"active\":%s,\"frames\":%lu,\"fps\":%.1f,"
+           "\"grabMs\":%lu,\"writeMs\":%lu,\"indexMs\":%lu}",
+           recordingActive() ? "true" : "false",
+           (unsigned long)recordingFrames(), recordingFps(),
+           (unsigned long)grab, (unsigned long)write, (unsigned long)index);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t recordHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
 
@@ -272,6 +308,87 @@ static esp_err_t captureHandler(httpd_req_t *req) {
   return res;
 }
 
+// Replays a recording as the same multipart stream the live view uses, so an
+// ordinary <img> plays it with no client-side decoding. Paced from the
+// timestamps in the index, so it runs at the speed it was recorded rather than
+// as fast as the card can read.
+static esp_err_t playStreamHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const String dir = queryParam(req, "dir", "");
+  if (!sdPathIsSafe(dir) || !sdExists(dir + "/index.txt")) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_send(req, "no such recording", HTTPD_RESP_USE_STRLEN);
+  }
+
+  void *index = nullptr;
+  void *video = nullptr;
+  if (!sdIndexOpen(dir + "/index.txt", &index)) return httpd_resp_send_500(req);
+  if (!sdOpenRead(dir + "/video.mjpeg", &video)) {
+    sdIndexClose(index);
+    return httpd_resp_send_500(req);
+  }
+
+  // One buffer for the whole replay, from PSRAM. Allocating per frame would
+  // fragment the heap over a few hundred frames.
+  static constexpr size_t MAX_FRAME = 200 * 1024;
+  uint8_t *buf = (uint8_t *)ps_malloc(MAX_FRAME);
+  if (!buf) {
+    sdIndexClose(index);
+    sdCloseRead(video);
+    return httpd_resp_send_500(req);
+  }
+
+  esp_err_t res = httpd_resp_set_type(req, STREAM_TYPE);
+  char partHeader[64];
+  const uint32_t playStart = millis();
+  uint32_t offset = 0, length = 0, atMs = 0;
+
+  while (res == ESP_OK && sdIndexNext(index, &offset, &length, &atMs)) {
+    if (length == 0 || length > MAX_FRAME) continue;
+
+    // Wait until this frame is due. A gap in the recording replays as a gap.
+    const int32_t due = (int32_t)(playStart + atMs - millis());
+    if (due > 0) delay(due > 2000 ? 2000 : due);
+
+    const size_t got = sdReadAt(video, offset, buf, length);
+    if (got != length) break;
+
+    const size_t hlen = snprintf(partHeader, sizeof(partHeader), STREAM_PART, got);
+    res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, partHeader, hlen);
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)buf, got);
+  }
+
+  free(buf);
+  sdIndexClose(index);
+  sdCloseRead(video);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return res;
+}
+
+static esp_err_t playPageHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+
+  const String dir = queryParam(req, "dir", "");
+  if (!sdPathIsSafe(dir) || !sdExists(dir + "/video.mjpeg")) {
+    return sendShell(req, "/files", "<h1>Playback</h1><p class=err>No recording there.</p>");
+  }
+
+  String body = "<h1>" + htmlEscape(dir) + "</h1>";
+  body += "<img id=p alt=\"recording\">";
+  body += "<div class=actions><a class=btn href=\"/files?path=/rec\">Back to recordings</a>"
+          "<button id=again>Replay</button></div>";
+  body += "<script>"
+          "const src = () => 'http://' + location.hostname + ':81/playstream?dir=" +
+          htmlEscape(dir) + "&t=' + Date.now();"
+          "const p = document.getElementById('p');"
+          "p.src = src();"
+          "document.getElementById('again').onclick = () => { p.src = src(); };"
+          "</script>";
+  return sendShell(req, "/files", body);
+}
+
 static esp_err_t streamHandler(httpd_req_t *req) {
   // The browser sends the session cookie with the <img> request, because cookies
   // are scoped to the host and ignore the port this server listens on.
@@ -282,7 +399,29 @@ static esp_err_t streamHandler(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
   char partHeader[64];
+
+  // While a recording runs, the recorder owns the camera and republishes each
+  // frame. Grabbing here as well starves it.
+  uint8_t *shared = nullptr;
+  uint32_t sharedSeq = 0;
+
   while (true) {
+    if (recordingActive()) {
+      if (!shared) shared = (uint8_t *)ps_malloc(200 * 1024);
+      size_t len = 0;
+      if (!shared || !recordingCopyLatest(shared, 200 * 1024, &len, &sharedSeq)) {
+        delay(10);
+        if (updating) break;
+        continue;
+      }
+      const size_t hlen = snprintf(partHeader, sizeof(partHeader), STREAM_PART, len);
+      res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+      if (res == ESP_OK) res = httpd_resp_send_chunk(req, partHeader, hlen);
+      if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)shared, len);
+      if (res != ESP_OK || updating) break;
+      continue;
+    }
+
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
       res = ESP_FAIL;
@@ -301,6 +440,7 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     if (res != ESP_OK) break;   // client went away, which is the normal exit
     if (updating) break;        // firmware is being written; release the camera
   }
+  if (shared) free(shared);
   return res;
 }
 
@@ -461,6 +601,28 @@ list.onchange = () => { if (list.value) box.value = list.value; };
 // is still running, so the page can poll without ever blocking the device.
 // A way back from a wedged service without pulling the power. Costs one handler
 // and removes the only remaining reason to reach for the plug.
+static esp_err_t benchHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  const SdBench b = sdBenchmark();
+  httpd_resp_set_type(req, "text/plain");
+  if (!b.ok) return httpd_resp_send(req, "benchmark failed", HTTPD_RESP_USE_STRLEN);
+
+  const uint32_t total = b.bytesEach * b.fileCount;
+  char out[400];
+  snprintf(out, sizeof(out),
+           "%d files of %lu bytes\n"
+           "  separate files : %lu ms  (%.0f KB/s, %.1f ms per file)\n"
+           "  one file       : %lu ms  (%.0f KB/s)\n"
+           "  per-file cost  : %.1f ms\n",
+           b.fileCount, (unsigned long)b.bytesEach,
+           (unsigned long)b.manyFilesMs, total / 1024.0 / (b.manyFilesMs / 1000.0),
+           (float)b.manyFilesMs / b.fileCount,
+           (unsigned long)b.oneFileMs, total / 1024.0 / (b.oneFileMs / 1000.0),
+           (float)(b.manyFilesMs - b.oneFileMs) / b.fileCount);
+  return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t restartHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   const esp_err_t res = sendShell(req, "/status",
@@ -499,8 +661,32 @@ static esp_err_t networksHandler(httpd_req_t *req) {
   return httpd_resp_send(req, json.c_str(), json.length());
 }
 
+// Reads a single query parameter. esp_http_server hands over the raw string and
+// leaves the parsing to the handler.
+static String queryParam(httpd_req_t *req, const char *key, const String &fallback) {
+  const size_t len = httpd_req_get_url_query_len(req);
+  if (len == 0 || len > 256) return fallback;
+
+  char raw[257];
+  if (httpd_req_get_url_query_str(req, raw, sizeof(raw)) != ESP_OK) return fallback;
+
+  char value[257];
+  if (httpd_query_key_value(raw, key, value, sizeof(value)) != ESP_OK) return fallback;
+  return urlDecode(String(value));
+}
+
 static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
+  String path = queryParam(req, "path", "/");
+  if (!sdPathIsSafe(path)) path = "/";
+
   String body = "<h1>Files</h1>";
+  body += "<p class=sub>" + htmlEscape(path) + "</p>";
+  if (path != "/") {
+    int cut = path.lastIndexOf('/');
+    const String parent = cut <= 0 ? "/" : path.substring(0, cut);
+    body += "<div class=actions><a class=btn href=\"/files?path=" +
+            htmlEscape(parent) + "\">Up</a></div>";
+  }
   if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
 
   if (!sdMounted()) {
@@ -511,14 +697,14 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   static constexpr int MAX_LISTED = 64;
   SdEntry entries[MAX_LISTED];
   int total = 0;
-  const int shown = sdListRoot(entries, MAX_LISTED, &total);
+  const int shown = sdList(path, entries, MAX_LISTED, &total);
 
   const uint64_t freeMb = (sdTotalBytes() - sdUsedBytes()) / (1024ULL * 1024ULL);
   body += "<p class=sub>" + String((uint32_t)(sdTotalBytes() / (1024ULL * 1024ULL))) +
           " MB card, " + String((uint32_t)freeMb) + " MB free.</p>";
 
   if (total == 0) {
-    body += "<p class=sub>The card is empty.</p>";
+    body += "<p class=sub>Nothing here.</p>";
     return sendShell(req, "/files", body);
   }
 
@@ -527,11 +713,22 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
     const String size = entries[i].isDir
                             ? String("directory")
                             : String((uint32_t)(entries[i].size / 1024)) + " KB";
+    String label = htmlEscape(entries[i].name);
+    if (entries[i].isDir) {
+      label = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + label + "</a>";
+    }
+
+    String extra;
+    // A directory holding a video file is a recording, so offer to play it.
+    if (entries[i].isDir && sdExists(entries[i].path + "/video.mjpeg")) {
+      extra = " <a href=\"/play?dir=" + htmlEscape(entries[i].path) + "\">play</a>";
+    }
+
     body += "<tr><td style=\"padding-right:12px\">"
             "<input type=checkbox name=f value=\"" + htmlEscape(entries[i].path) +
             "\" style=\"width:auto\"></td>"
-            "<th>" + htmlEscape(entries[i].name) + "</th>"
-            "<td>" + size + "</td></tr>";
+            "<th>" + label + "</th>"
+            "<td>" + size + extra + "</td></tr>";
   }
   body += "</table>";
   if (total > shown) {
@@ -764,14 +961,18 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t updpost = {"/update",  HTTP_POST, updatePostHandler, nullptr};
   httpd_uri_t flash   = {"/flash",   HTTP_POST, flashHandler,      nullptr};
   httpd_uri_t record  = {"/record",  HTTP_POST, recordHandler,     nullptr};
+  httpd_uri_t recstate = {"/record", HTTP_GET,  recordStateHandler, nullptr};
   httpd_uri_t setpage = {"/settings", HTTP_GET,  settingsPageHandler, nullptr};
   httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
   httpd_uri_t nets    = {"/networks", HTTP_GET,  networksHandler,     nullptr};
   httpd_uri_t restart = {"/restart",  HTTP_GET,  restartHandler,      nullptr};
+  httpd_uri_t bench   = {"/sdbench",  HTTP_GET,  benchHandler,        nullptr};
+  httpd_uri_t play    = {"/play",     HTTP_GET,  playPageHandler,     nullptr};
   httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};
   httpd_uri_t filesdel = {"/files",   HTTP_POST, filesDeleteHandler,  nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
   httpd_uri_t stream  = {"/stream",  HTTP_GET, streamHandler,  nullptr};
+  httpd_uri_t replay  = {"/playstream", HTTP_GET, playStreamHandler, nullptr};
 
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = 80;
@@ -783,7 +984,7 @@ bool startWebServers(bool cameraOk) {
 
   // Defaults to 8. Exceeding it makes httpd_register_uri_handler fail quietly,
   // and the page simply 404s with nothing in the log to say why.
-  cfg.max_uri_handlers = 16;
+  cfg.max_uri_handlers = 24;
   if (httpd_start(&pageServer, &cfg) != ESP_OK) {
     Serial.println("page server failed to start");
     return false;
@@ -797,10 +998,13 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &updpost);
   registerUri(pageServer, &flash);
   registerUri(pageServer, &record);
+  registerUri(pageServer, &recstate);
   registerUri(pageServer, &setpage);
   registerUri(pageServer, &setpost);
   registerUri(pageServer, &nets);
   registerUri(pageServer, &restart);
+  registerUri(pageServer, &bench);
+  registerUri(pageServer, &play);
   registerUri(pageServer, &files);
   registerUri(pageServer, &filesdel);
   registerUri(pageServer, &capture);
@@ -816,6 +1020,7 @@ bool startWebServers(bool cameraOk) {
     return false;
   }
   registerUri(streamServer, &stream);
+  registerUri(streamServer, &replay);
   return true;
 }
 

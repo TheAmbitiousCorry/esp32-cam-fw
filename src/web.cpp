@@ -1821,33 +1821,43 @@ bool startWebServers(bool cameraOk) {
   configLoad(stored);
   if (!stored.cameraName.isEmpty()) cameraName = stored.cameraName;
 
-  httpd_uri_t index   = {"/",        HTTP_GET,  indexHandler,     nullptr};
-  httpd_uri_t login   = {"/login",   HTTP_GET,  loginPageHandler, nullptr};
-  httpd_uri_t signin  = {"/login",   HTTP_POST, loginPostHandler, nullptr};
-  httpd_uri_t logout  = {"/logout",  HTTP_GET,  logoutHandler,    nullptr};
-  httpd_uri_t status  = {"/status",  HTTP_GET,  statusHandler,    nullptr};
-  httpd_uri_t updpage = {"/update",  HTTP_GET,  updatePageHandler, nullptr};
-  httpd_uri_t updpost = {"/update",  HTTP_POST, updatePostHandler, nullptr};
-  httpd_uri_t flash   = {"/flash",   HTTP_POST, flashHandler,      nullptr};
-  httpd_uri_t record  = {"/record",  HTTP_POST, recordHandler,     nullptr};
-  httpd_uri_t recstate = {"/record", HTTP_GET,  recordStateHandler, nullptr};
-  httpd_uri_t setpage = {"/settings", HTTP_GET,  settingsPageHandler, nullptr};
-  httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
-  httpd_uri_t nets    = {"/networks", HTTP_GET,  networksHandler,     nullptr};
-  httpd_uri_t restart = {"/restart",  HTTP_GET,  restartHandler,      nullptr};
-  httpd_uri_t bench   = {"/sdbench",  HTTP_GET,  benchHandler,        nullptr};
-  httpd_uri_t play    = {"/play",     HTTP_GET,  playPageHandler,     nullptr};
-  httpd_uri_t retrycam = {"/retrycam", HTTP_GET, cameraRetryHandler,  nullptr};
-  httpd_uri_t recs    = {"/recording", HTTP_GET,  recordingsPageHandler, nullptr};
-  httpd_uri_t recspost = {"/recording", HTTP_POST, recordingsPostHandler, nullptr};
-  httpd_uri_t recidx  = {"/recindex", HTTP_GET,  recIndexHandler,     nullptr};
-  httpd_uri_t frame   = {"/frame",    HTTP_GET,  frameHandler,        nullptr};
-  httpd_uri_t dl      = {"/download", HTTP_GET,  downloadHandler,     nullptr};
-  httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};
-  httpd_uri_t filesdel = {"/files",   HTTP_POST, filesDeleteHandler,  nullptr};
-  httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
-  httpd_uri_t stream  = {"/stream",  HTTP_GET, streamHandler,  nullptr};
-  httpd_uri_t replay  = {"/playstream", HTTP_GET, playStreamHandler, nullptr};
+  // One wildcard handler and an internal table, rather than one registration per
+  // route. esp_http_server allocates a fixed array of handler slots at
+  // httpd_start() and never grows it, so registering per route means a ceiling
+  // that silently 404s whatever sits past it. That has bitten twice, at 8 and
+  // again at 24, and each time looked like a failed firmware upload. The library
+  // now sees two registrations however many routes exist, and adding a route is
+  // a line in this table.
+  static const Route PAGE_ROUTES[] = {
+      {"/", HTTP_GET, indexHandler},
+      {"/login", HTTP_GET, loginPageHandler},
+      {"/login", HTTP_POST, loginPostHandler},
+      {"/logout", HTTP_GET, logoutHandler},
+      {"/capture", HTTP_GET, captureHandler},
+      {"/status", HTTP_GET, statusHandler},
+      {"/restart", HTTP_GET, restartHandler},
+      {"/retrycam", HTTP_GET, cameraRetryHandler},
+      {"/settings", HTTP_GET, settingsPageHandler},
+      {"/settings", HTTP_POST, settingsPostHandler},
+      {"/networks", HTTP_GET, networksHandler},
+      {"/recording", HTTP_GET, recordingsPageHandler},
+      {"/recording", HTTP_POST, recordingsPostHandler},
+      {"/record", HTTP_GET, recordStateHandler},
+      {"/record", HTTP_POST, recordHandler},
+      {"/flash", HTTP_POST, flashHandler},
+      {"/image", HTTP_POST, imageHandler},
+      {"/files", HTTP_GET, filesPageHandler},
+      {"/files", HTTP_POST, filesDeleteHandler},
+      {"/download", HTTP_GET, downloadHandler},
+      {"/play", HTTP_GET, playPageHandler},
+      {"/recindex", HTTP_GET, recIndexHandler},
+      {"/frame", HTTP_GET, frameHandler},
+      {"/update", HTTP_GET, updatePageHandler},
+      {"/update", HTTP_POST, updatePostHandler},
+      {"/sdbench", HTTP_GET, benchHandler},
+  };
+  routeTable = PAGE_ROUTES;
+  routeCount = sizeof(PAGE_ROUTES) / sizeof(PAGE_ROUTES[0]);
 
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = 80;
@@ -1857,49 +1867,32 @@ bool startWebServers(bool cameraOk) {
   cfg.recv_wait_timeout = 30;
   cfg.send_wait_timeout = 30;
 
-  // Defaults to 8. Exceeding it makes httpd_register_uri_handler fail quietly,
-  // and the page simply 404s with nothing in the log to say why.
-  cfg.max_uri_handlers = 24;
+  // Only the two wildcards are registered, so the default of eight is ample.
+  cfg.uri_match_fn = httpd_uri_match_wildcard;
+
   if (httpd_start(&pageServer, &cfg) != ESP_OK) {
     Serial.println("page server failed to start");
     return false;
   }
-  registerUri(pageServer, &index);
-  registerUri(pageServer, &login);
-  registerUri(pageServer, &signin);
-  registerUri(pageServer, &logout);
-  registerUri(pageServer, &status);
-  registerUri(pageServer, &updpage);
-  registerUri(pageServer, &updpost);
-  registerUri(pageServer, &flash);
-  registerUri(pageServer, &record);
-  registerUri(pageServer, &recstate);
-  registerUri(pageServer, &setpage);
-  registerUri(pageServer, &setpost);
-  registerUri(pageServer, &nets);
-  registerUri(pageServer, &restart);
-  registerUri(pageServer, &bench);
-  registerUri(pageServer, &play);
-  registerUri(pageServer, &retrycam);
-  registerUri(pageServer, &recs);
-  registerUri(pageServer, &recspost);
-  registerUri(pageServer, &recidx);
-  registerUri(pageServer, &frame);
-  registerUri(pageServer, &dl);
-  registerUri(pageServer, &files);
-  registerUri(pageServer, &filesdel);
-  registerUri(pageServer, &capture);
+
+  httpd_uri_t getAll = {"/*", HTTP_GET, dispatchHandler, nullptr};
+  httpd_uri_t postAll = {"/*", HTTP_POST, dispatchHandler, nullptr};
+  registerUri(pageServer, &getAll);
+  registerUri(pageServer, &postAll);
 
   // The stream gets its own server because a handler that never returns occupies
   // its server's only worker task. Sharing one server would mean the page and
-  // /capture stop responding for as long as anyone is watching.
+  // /capture stop responding for as long as anyone is watching. Two routes, so
+  // they are registered directly.
   cfg.server_port = 81;
   cfg.ctrl_port = 32769;  // must differ, or the second server refuses to start
-  cfg.stack_size = 8192;
+  cfg.uri_match_fn = nullptr;
   if (httpd_start(&streamServer, &cfg) != ESP_OK) {
     Serial.println("stream server failed to start");
     return false;
   }
+  httpd_uri_t stream = {"/stream", HTTP_GET, streamHandler, nullptr};
+  httpd_uri_t replay = {"/playstream", HTTP_GET, playStreamHandler, nullptr};
   registerUri(streamServer, &stream);
   registerUri(streamServer, &replay);
   return true;

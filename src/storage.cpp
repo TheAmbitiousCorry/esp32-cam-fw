@@ -1,6 +1,12 @@
 #include <SD_MMC.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #include "storage.h"
+
+// Where the card is mounted. Needed as a string as well as a handle, because
+// listing goes through the POSIX layer rather than the Arduino one.
+static constexpr char SD_MOUNT[] = "/sdcard";
 
 static bool mounted = false;
 static bool writable = false;
@@ -44,7 +50,7 @@ bool sdInit() {
   // The second argument is 1-bit mode. Format-if-empty is left off: silently
   // formatting a card someone just plugged in is not a decision firmware should
   // make on its own.
-  if (!SD_MMC.begin("/sdcard", true)) {
+  if (!SD_MMC.begin(SD_MOUNT, true)) {
     Serial.println("SD: no card, or it could not be mounted");
     mounted = false;
     return false;
@@ -108,22 +114,39 @@ int sdList(const String &path, SdEntry *out, int max, int *totalFound, int start
   if (totalFound) *totalFound = 0;
   if (!mounted || !sdPathIsSafe(path)) return 0;
 
-  File dir = SD_MMC.open(path);
-  if (!dir || !dir.isDirectory()) return 0;
+  // readdir, rather than the Arduino directory API, which opens every child just
+  // to learn its name. An open costs about 150ms on this card, so a day holding
+  // a hundred recordings took eight seconds to list. The directory entry already
+  // carries the name and whether it is a directory; only a file's size needs
+  // asking for, and sizes are not shown for the directories that dominate.
+  const String base = String(SD_MOUNT) + (path == "/" ? "" : path);
+  DIR *dir = opendir(base.c_str());
+  if (!dir) return 0;
 
+  const String prefix = (path == "/" ? String("/") : path + "/");
   int written = 0, seen = 0;
-  for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+  for (struct dirent *e = readdir(dir); e; e = readdir(dir)) {
+    // Hidden names are the firmware's own bookkeeping, plus whatever a desktop
+    // left behind the last time the card was in one. Neither is footage, and
+    // counting them here would put the paging numbers out by however many there
+    // happened to be.
+    if (e->d_name[0] == '.') continue;
     seen++;
     if (seen > startAt && written < max) {
-      out[written].name = entry.name();
-      out[written].path = entry.path();
-      out[written].size = entry.size();
-      out[written].isDir = entry.isDirectory();
+      out[written].name = e->d_name;
+      out[written].path = prefix + e->d_name;
+      out[written].isDir = (e->d_type == DT_DIR);
+      out[written].size = 0;
+      if (!out[written].isDir) {
+        struct stat st;
+        if (stat((base + "/" + e->d_name).c_str(), &st) == 0) {
+          out[written].size = st.st_size;
+        }
+      }
       written++;
     }
-    entry.close();
   }
-  dir.close();
+  closedir(dir);
   if (totalFound) *totalFound = seen;
   return written;
 }

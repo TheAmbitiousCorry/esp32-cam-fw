@@ -119,6 +119,11 @@ static const char SHARED_CSS[] =
     ".app{display:flex;min-height:100vh}"
     "aside{width:180px;flex:0 0 180px;background:#181818;border-right:1px solid #262626;"
     "padding:18px 0;display:flex;flex-direction:column;gap:2px}"
+    ".brand{display:flex;align-items:center;gap:9px}"
+    ".brand .logo{flex:0 0 17px;line-height:0}"
+    ".brand .logo svg{width:17px;height:auto;display:block}"
+    ".loginmark{display:flex;justify-content:center;margin-bottom:14px}"
+    ".loginmark svg{width:46px;height:auto;color:#2a7}"
     ".brand{padding:0 18px 16px;font-weight:600;font-size:15px;color:#fff;"
     "overflow-wrap:anywhere}"
     "aside a{display:flex;align-items:center;gap:10px;padding:9px 18px;color:#aaa;"
@@ -229,10 +234,37 @@ static void registerUri(httpd_handle_t server, const httpd_uri_t *uri) {
   }
 }
 
+// The Argus eye: one neck of the creature the aggregator is named for, since a
+// camera is one of its eyes. Inline like every other icon here, so there is
+// nothing extra to serve and it takes the colour of whatever it sits in.
+static const char ARGUS_EYE[] =
+    "<svg viewBox='0 0 64 100' fill='none' stroke='currentColor' stroke-width='5' "
+    "stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>"
+    "<path d='M32 3v7M18 7l4 7M46 7l-4 7M7 15l5 6M57 15l-5 6M2 27h7M62 27h-7'/>"
+    "<path d='M6 30c8-11 16-16 26-16s18 5 26 16c-8 11-16 16-26 16S14 41 6 30z'/>"
+    "<circle cx='32' cy='30' r='9'/><circle cx='32' cy='30' r='3' fill='currentColor'/>"
+    "<path d='M32 46c0 7-7 10-7 17s9 9 9 16'/>"
+    "<path d='M34 79c6 0 10 4 10 9s-4 9-10 9-11-4-11-9 4-7 8-7 6 2 6 5-2 4-4 4'/>"
+    "</svg>";
+
+// The favicon is the same drawing, handed over as a data URI so it costs one
+// attribute rather than a route and a request.
+static const char ARGUS_FAVICON[] =
+    "<link rel=icon href=\"data:image/svg+xml,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 100' fill='none' "
+    "stroke='%23e8e8e8' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E"
+    "%3Cpath d='M32 3v7M18 7l4 7M46 7l-4 7M7 15l5 6M57 15l-5 6M2 27h7M62 27h-7'/%3E"
+    "%3Cpath d='M6 30c8-11 16-16 26-16s18 5 26 16c-8 11-16 16-26 16S14 41 6 30z'/%3E"
+    "%3Ccircle cx='32' cy='30' r='9'/%3E%3Ccircle cx='32' cy='30' r='3' fill='%23e8e8e8'/%3E"
+    "%3Cpath d='M32 46c0 7-7 10-7 17s9 9 9 16'/%3E"
+    "%3Cpath d='M34 79c6 0 10 4 10 9s-4 9-10 9-11-4-11-9 4-7 8-7 6 2 6 5-2 4-4 4'/%3E"
+    "%3C/svg%3E\">";
+
 static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
   String page = "<!doctype html><meta charset=utf-8>"
-                "<meta name=viewport content='width=device-width,initial-scale=1'>"
-                "<title>";
+                "<meta name=viewport content='width=device-width,initial-scale=1'>";
+  page += ARGUS_FAVICON;
+  page += "<title>";
   page += htmlEscape(cameraName);
   page += "</title><style>";
   page += SHARED_CSS;
@@ -251,7 +283,9 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
       {"/status", "Status", "gauge"}, {"/settings", "Settings", "cog"},
       {"/update", "Firmware", "chip"}};
 
-  String nav = "<div class=app><aside><div class=brand>" + htmlEscape(cameraName) + "</div>";
+  String nav = "<div class=app><aside><div class=brand>";
+  nav += String("<span class=logo>") + ARGUS_EYE + "</span>";
+  nav += htmlEscape(cameraName) + "</div>";
   for (const Item &it : items) {
     nav += String("<a href=\"") + it.href + "\"";
     if (strcmp(it.href, active) == 0) nav += " class=on";
@@ -263,7 +297,8 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
 }
 
 static esp_err_t sendLoginPage(httpd_req_t *req, const String &error) {
-  String body = "<div class=card><form method=post action=/login>"
+  String body = String("<div class=card><form method=post action=/login>"
+                       "<div class=loginmark>") + ARGUS_EYE + "</div>"
                 "<h2>" + htmlEscape(cameraName) + "</h2>"
                 "<p class=sub>Sign in to view this camera.</p>"
                 "<label>Username</label><input name=user autofocus required>"

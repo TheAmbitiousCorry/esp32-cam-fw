@@ -137,14 +137,27 @@ void flashSet(bool on) {
 bool flashIsOn() { return flashOn; }
 
 void cameraApplySettings(int frameSize, int quality) {
+  const bool sizeChanged = (frameSize != currentFrameSize);
   currentFrameSize = frameSize;
   currentQuality = quality;
   if (!cameraReady) return;
 
   sensor_t *s = esp_camera_sensor_get();
   if (!s) return;
-  s->set_framesize(s, (framesize_t)frameSize);
+
+  // Quality is a sensor register and is safe to change while running.
   s->set_quality(s, quality);
+
+  // Frame size is not. The driver's buffers were sized at init, and calling
+  // set_framesize() on a running sensor leaves it in a state where a single
+  // frame takes thirty seconds. Rebuilding the driver costs the live view about
+  // a second and is the only correct way to change geometry.
+  if (sizeChanged) {
+    Serial.printf("frame size changed, reinitialising the camera\n");
+    esp_camera_deinit();
+    cameraReady = false;
+    cameraReady = cameraInit();
+  }
 }
 
 int cameraFrameSize() { return currentFrameSize; }

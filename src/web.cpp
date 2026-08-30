@@ -1141,10 +1141,14 @@ static esp_err_t sendRecordings(httpd_req_t *req, const String &notice) {
   body += "</div>";
 
   body += "<h2 style=\"margin-top:24px\">Image</h2>";
+  // Symbols, not numbers: framesize_t values move between SDK versions, and
+  // writing them out by hand mislabelled every entry in this list once already.
   struct Size { int value; const char *label; };
-  static const Size SIZES[] = {{5, "320x240"},  {6, "400x296"},  {8, "640x480"},
-                               {9, "800x600"},  {10, "1024x768"}, {11, "1280x1024"},
-                               {13, "1600x1200"}};
+  static const Size SIZES[] = {
+      {FRAMESIZE_QVGA, "320x240"},   {FRAMESIZE_CIF, "400x296"},
+      {FRAMESIZE_VGA, "640x480"},    {FRAMESIZE_SVGA, "800x600"},
+      {FRAMESIZE_XGA, "1024x768"},   {FRAMESIZE_SXGA, "1280x1024"},
+      {FRAMESIZE_UXGA, "1600x1200"}};
   body += "<label>Frame size</label><select name=fsize>";
   for (const Size &s : SIZES) {
     body += String("<option value=") + s.value +
@@ -1217,7 +1221,7 @@ static esp_err_t recordingsPostHandler(httpd_req_t *req) {
   stored.scheduleDays = days;
 
   const int fsize = formField(body, "fsize").toInt();
-  if (fsize >= 0 && fsize <= 13) stored.frameSize = (uint8_t)fsize;
+  if (fsize >= 0 && fsize <= (int)FRAMESIZE_UXGA) stored.frameSize = (uint8_t)fsize;
   const int jq = formField(body, "jq").toInt();
   if (jq >= 10 && jq <= 63) stored.jpegQuality = (uint8_t)jq;
 

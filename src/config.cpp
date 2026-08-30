@@ -1,4 +1,5 @@
 #include <MD5Builder.h>
+#include "esp_camera.h"
 #include <Preferences.h>
 #include "mbedtls/pkcs5.h"
 
@@ -85,7 +86,7 @@ bool configLoad(Config &out) {
   out.motionEnabled = prefs.getBool("moten", false);
   out.motionSensitivity = prefs.getUChar("motsens", 20);
   out.recordSeconds = prefs.getUChar("recsec", 10);
-  out.frameSize = prefs.getUChar("fsize", 8);
+  out.frameSize = prefs.getUChar("fsize", (uint8_t)FRAMESIZE_SVGA);
   out.jpegQuality = prefs.getUChar("jq", 12);
   out.keepFreeMb = prefs.getUShort("keepfree", 512);
   out.scheduleEnabled = prefs.getBool("schen", false);

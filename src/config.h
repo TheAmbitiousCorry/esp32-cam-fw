@@ -35,9 +35,11 @@ struct Config {
 
   // Free space to protect, in MB. When a recording would take the card below
   // this, the oldest recordings are removed first. Zero disables it.
-  // Frame size is a framesize_t; quality runs 10 (best) to 63 (worst). Together
-  // they decide how much card an hour costs and whether a face is recognisable.
-  uint8_t frameSize = 8;  // FRAMESIZE_SVGA
+  // Frame size is a framesize_t value; quality runs 10 (best) to 63 (worst).
+  // Together they decide how much card an hour costs and whether a face is
+  // recognisable. The numeric values of framesize_t shift between SDK versions,
+  // so the default is taken from the symbol rather than written as a number.
+  uint8_t frameSize = 0;  // 0 means "unset", replaced on load
   uint8_t jpegQuality = 12;
 
   uint16_t keepFreeMb = 512;

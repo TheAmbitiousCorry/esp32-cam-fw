@@ -370,6 +370,8 @@ static esp_err_t playStreamHandler(httpd_req_t *req) {
     return httpd_resp_send(req, "no such recording", HTTPD_RESP_USE_STRLEN);
   }
 
+  const long fromFrame = queryParam(req, "from", "0").toInt();
+
   void *index = nullptr;
   void *video = nullptr;
   if (!sdIndexOpen(dir + "/index.txt", &index)) return httpd_resp_send_500(req);
@@ -390,14 +392,22 @@ static esp_err_t playStreamHandler(httpd_req_t *req) {
 
   esp_err_t res = httpd_resp_set_type(req, STREAM_TYPE);
   char partHeader[64];
-  const uint32_t playStart = millis();
   uint32_t offset = 0, length = 0, atMs = 0;
+
+  // Skip to the starting frame before the clock starts, so resuming from the
+  // middle does not replay the skipped time as a pause.
+  uint32_t baseMs = 0;
+  for (long i = 0; i < fromFrame; i++) {
+    if (!sdIndexNext(index, &offset, &length, &atMs)) break;
+    baseMs = atMs;
+  }
+  const uint32_t playStart = millis();
 
   while (res == ESP_OK && sdIndexNext(index, &offset, &length, &atMs)) {
     if (length == 0 || length > MAX_FRAME) continue;
 
     // Wait until this frame is due. A gap in the recording replays as a gap.
-    const int32_t due = (int32_t)(playStart + atMs - millis());
+    const int32_t due = (int32_t)(playStart + (atMs - baseMs) - millis());
     if (due > 0) delay(due > 2000 ? 2000 : due);
 
     const size_t got = sdReadAt(video, offset, buf, length);
@@ -511,22 +521,21 @@ const bar = document.getElementById('scrub');
 const pos = document.getElementById('pos');
 const pp  = document.getElementById('pp');
 
-// Each entry is [timestampMs, byteOffset, byteLength]. Holding the offsets here
-// means a seek is one read on the device rather than a walk through the index.
-let idx = [], at = 0, timer = null;
+// Each entry is [timestampMs, byteOffset, byteLength].
+let idx = [], at = 0, timer = null, playing = false;
 
-// One request in flight at a time, with the newest target winning. Dragging a
-// slider otherwise queues a request per tick, each waiting behind the last, and
-// the picture ends up permanently behind the handle.
+// Two ways to show a frame, because they are good at different things. Playing
+// uses one long-lived multipart connection, which runs at the speed it was
+// recorded. Scrubbing fetches single frames, which can jump anywhere but costs a
+// round trip each, so it tops out near seven a second.
 let inFlight = false, wanted = null;
 
-const label = n => {
+const label = n =>
   pos.textContent = (idx[n][0] / 1000).toFixed(1) + 's  /  ' +
                     (idx[idx.length - 1][0] / 1000).toFixed(1) + 's   frame ' +
                     (n + 1) + ' of ' + idx.length;
-};
 
-const load = n => {
+const loadFrame = n => {
   wanted = n;
   if (inFlight) return;
   inFlight = true;
@@ -538,8 +547,9 @@ const load = n => {
 };
 
 const settled = () => {
+  if (playing) return;
   inFlight = false;
-  if (wanted !== null) load(wanted);
+  if (wanted !== null) loadFrame(wanted);
 };
 img.onload = settled;
 img.onerror = settled;
@@ -547,26 +557,43 @@ img.onerror = settled;
 const show = n => {
   at = Math.max(0, Math.min(n, idx.length - 1));
   bar.value = at;
-  load(at);
+  loadFrame(at);
 };
 
-const stop = () => { clearTimeout(timer); timer = null; pp.textContent = 'Play'; };
-
-const step = () => {
-  if (at >= idx.length - 1) { stop(); return; }
-  const gap = idx[at + 1][0] - idx[at][0];
-  show(at + 1);
-  timer = setTimeout(step, Math.max(gap, 20));
+const stopPlaying = () => {
+  playing = false;
+  clearInterval(timer);
+  timer = null;
+  pp.textContent = 'Play';
+  inFlight = false;
+  loadFrame(at);           // back to a still at wherever playback reached
 };
 
-pp.onclick = () => {
-  if (timer) { stop(); return; }
-  if (at >= idx.length - 1) show(0);
+const startPlaying = () => {
+  if (at >= idx.length - 1) at = 0;
+  playing = true;
   pp.textContent = 'Pause';
-  timer = setTimeout(step, 20);
+
+  const startFrame = at;
+  const startedAt = Date.now();
+  img.src = 'http://' + location.hostname + ':81/playstream?dir=' +
+            encodeURIComponent(DIR) + '&from=' + startFrame + '&t=' + startedAt;
+
+  // The slider is advanced from the index rather than from the stream, which
+  // does not report where it has reached. Same timestamps, so it tracks.
+  timer = setInterval(() => {
+    const elapsed = Date.now() - startedAt + idx[startFrame][0];
+    let n = at;
+    while (n < idx.length - 1 && idx[n + 1][0] <= elapsed) n++;
+    at = n;
+    bar.value = at;
+    label(at);
+    if (at >= idx.length - 1) stopPlaying();
+  }, 100);
 };
 
-bar.oninput = () => { stop(); show(+bar.value); };
+pp.onclick = () => (playing ? stopPlaying() : startPlaying());
+bar.oninput = () => { if (playing) stopPlaying(); show(+bar.value); };
 
 (async () => {
   idx = await (await fetch('/recindex?dir=' + encodeURIComponent(DIR))).json();

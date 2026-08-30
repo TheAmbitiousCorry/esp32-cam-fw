@@ -117,6 +117,12 @@ pio run -e esp32cam_ota -t upload   # flash over Wi-Fi
 The version string comes from `git describe` at build time and appears on the
 status page.
 
+## Design principles
+
+`docs/principles.md` records what this board taught us, with the measurement
+behind each rule. Read it before adding anything that touches the camera, the
+card, or the radio.
+
 ## Hardware notes
 
 ### An inserted SD card blocks USB flashing

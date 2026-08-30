@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
+#include "esp_mac.h"
 
 #ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "unknown"
@@ -329,7 +330,7 @@ static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
                 "<meta name=viewport content='width=device-width,initial-scale=1'>";
   page += ARGUS_FAVICON;
   page += "<title>";
-  page += htmlEscape(cameraName) + " Cam";
+  page += htmlEscape(cameraName) + " Argus Cam";
   page += "</title><style>";
   page += SHARED_CSS;
   page += "</style>";
@@ -349,7 +350,7 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
 
   String nav = "<div class=app><aside><div class=brand>";
   nav += String("<span class=logo>") + ARGUS_EYE + "</span>";
-  nav += htmlEscape(cameraName) + " Cam</div>";
+  nav += htmlEscape(cameraName) + " Argus Cam</div>";
   for (const Item &it : items) {
     nav += String("<a href=\"") + it.href + "\"";
     if (strcmp(it.href, active) == 0) nav += " class=on";
@@ -363,7 +364,7 @@ static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &m
 static esp_err_t sendLoginPage(httpd_req_t *req, const String &error) {
   String body = String("<div class=card><form method=post action=/login>"
                        "<div class=loginmark>") + ARGUS_EYE + "</div>"
-                "<h2>" + htmlEscape(cameraName) + " Cam</h2>"
+                "<h2>" + htmlEscape(cameraName) + " Argus Cam</h2>"
                 "<p class=sub>Sign in to view this camera.</p>"
                 "<label>Username</label><input name=user autofocus required>"
                 "<label>Password</label><input type=password name=pass required>";
@@ -1863,7 +1864,18 @@ static esp_err_t versionHandler(httpd_req_t *req) {
   TrialState trial;
   trialLoad(trial);
 
-  String json = "{\"version\":\"" + jsonEscape(FIRMWARE_VERSION) + "\"";
+  // The camera's own name for itself, and the only one that survives being
+  // removed from an aggregator and added back. Anything keyed on an identifier
+  // the other side generates loses its footage the moment somebody deletes a
+  // camera and re-adds it, which is exactly what happened.
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2],
+           mac[3], mac[4], mac[5]);
+
+  String json = String("{\"mac\":\"") + macHex + "\"";
+  json += ",\"version\":\"" + jsonEscape(FIRMWARE_VERSION) + "\"";
   json += ",\"built\":\"" + jsonEscape(String(__DATE__) + " " + __TIME__) + "\"";
   json += ",\"slot\":\"" + jsonEscape(slot) + "\"";
   json += ",\"onTrial\":";

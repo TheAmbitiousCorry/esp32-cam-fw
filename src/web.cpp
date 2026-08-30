@@ -1626,6 +1626,88 @@ static esp_err_t downloadHandler(httpd_req_t *req) {
   return res;
 }
 
+// Quotes and backslashes are the only characters that can break out of a JSON
+// string here; the settings this serves are names and timezones, not free text.
+static String jsonEscape(const String &in) {
+  String out;
+  for (size_t i = 0; i < in.length(); i++) {
+    const char c = in[i];
+    if (c == '"' || c == '\\') out += '\\';
+    if ((uint8_t)c < 0x20) continue;
+    out += c;
+  }
+  return out;
+}
+
+// Every setting, as JSON.
+//
+// The pages render settings into HTML forms, which is fine for a person and
+// useless for anything else: an aggregator setting one value across several
+// cameras would have to scrape a form to learn the other values it must not
+// disturb. It has to learn them, because the form handlers take a whole form,
+// and a checkbox left out of a POST reads as unticked rather than unchanged.
+// So read here, merge, and post the whole thing back.
+static esp_err_t configJsonHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  Config c;
+  configLoad(c);
+
+  String json = "{";
+  auto num = [&](const char *k, long v) {
+    if (json.length() > 1) json += ",";
+    json += "\"" + String(k) + "\":" + String(v);
+  };
+  auto boolean = [&](const char *k, bool v) {
+    if (json.length() > 1) json += ",";
+    json += "\"" + String(k) + "\":" + (v ? "true" : "false");
+  };
+  auto text = [&](const char *k, const String &v) {
+    if (json.length() > 1) json += ",";
+    json += "\"" + String(k) + "\":\"" + jsonEscape(v) + "\"";
+  };
+
+  text("camname", c.cameraName);
+  text("tz", c.timezone);
+  text("ssid", c.wifiSsid);
+  boolean("apwin", c.apWindow);
+
+  boolean("moten", c.motionEnabled);
+  num("motsens", c.motionSensitivity);
+  num("recsec", c.recordSeconds);
+  num("presec", c.prerollSeconds);
+  num("quietsec", c.quietSeconds);
+  num("keepfree", c.keepFreeMb);
+
+  boolean("schen", c.scheduleEnabled);
+  num("schfrom", c.scheduleFromHour);
+  num("schto", c.scheduleToHour);
+  num("schdays", c.scheduleDays);
+
+  num("fsize", c.frameSize);
+  num("jq", c.jpegQuality);
+  boolean("autoimg", c.autoImage);
+  num("ael", c.aeLevel);
+  num("gc", c.gainCeiling);
+  num("bri", c.brightness);
+  num("con", c.contrast);
+  num("sat", c.saturation);
+  num("wb", c.wbMode);
+  boolean("gray", c.grayscale);
+  boolean("hmir", c.hmirror);
+  boolean("vflip", c.vflip);
+  num("flashlvl", c.flashLevel);
+
+  // What the sensor is actually doing, which under auto is not what is stored.
+  num("aelnow", cameraCurrentImage().aeLevel);
+  num("gcnow", cameraCurrentImage().gainCeiling);
+  text("unsupported", cameraUnsupported());
+
+  json += "}";
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, json.c_str(), json.length());
+}
+
 static esp_err_t restartHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   const esp_err_t res = sendShell(req, "/status",
@@ -2539,6 +2621,7 @@ bool startWebServers(bool cameraOk) {
       {"/logout", HTTP_GET, logoutHandler},
       {"/capture", HTTP_GET, captureHandler},
       {"/status", HTTP_GET, statusHandler},
+      {"/config", HTTP_GET, configJsonHandler},
       {"/restart", HTTP_GET, restartHandler},
       {"/retrycam", HTTP_GET, cameraRetryHandler},
       {"/settings", HTTP_GET, settingsPageHandler},

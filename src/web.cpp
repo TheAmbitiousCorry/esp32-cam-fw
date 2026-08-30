@@ -12,6 +12,7 @@
 #include "camera.h"
 #include "config.h"
 #include "portal.h"
+#include "recording.h"
 #include "storage.h"
 #include "httputil.h"
 #include "web.h"
@@ -180,6 +181,11 @@ static esp_err_t logoutHandler(httpd_req_t *req) {
 
 static const char INDEX_BODY[] = R"HTML(<img id="v" alt="live view">
 <script>
+const rb = document.getElementById('rec');
+if (rb) rb.onclick = async () => {
+  rb.textContent = (await (await fetch('/record', {method: 'POST'})).text());
+};
+
 const fb = document.getElementById('flash');
 if (fb) fb.onclick = async () => {
   const state = await (await fetch('/flash', {method: 'POST'})).text();
@@ -205,13 +211,30 @@ static esp_err_t indexHandler(httpd_req_t *req) {
   String body = "<h1>Live view</h1><div class=actions>";
   body += String("<button id=flash class=\"") + (flashIsOn() ? "on" : "") + "\">Flash "
           + (flashIsOn() ? "on" : "off") + "</button>";
-  body += "<a class=btn href=\"/capture\" target=_blank>Still image</a></div>";
+  body += "<a class=btn href=\"/capture\" target=_blank>Still image</a>";
+  body += String("<button id=rec class=\"") + (recordingActive() ? "on" : "") + "\">" +
+          (recordingActive() ? "Recording..." : "Record 10s") + "</button></div>";
   body += INDEX_BODY;
   return sendShell(req, "/", body);
 }
 
 // Toggles rather than taking a state, so the button cannot disagree with the
 // device when two browsers are open on the same camera.
+static esp_err_t recordHandler(httpd_req_t *req) {
+  if (!authGuardResource(req)) return ESP_OK;
+
+  httpd_resp_set_type(req, "text/plain");
+  if (recordingActive()) {
+    recordingStop();
+    return httpd_resp_send(req, "stopped", HTTPD_RESP_USE_STRLEN);
+  }
+  if (!recordingStart(10)) {
+    return httpd_resp_send(req, "could not start: no writable card, or no camera",
+                           HTTPD_RESP_USE_STRLEN);
+  }
+  return httpd_resp_send(req, "recording", HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t flashHandler(httpd_req_t *req) {
   if (!authGuardResource(req)) return ESP_OK;
   flashSet(!flashIsOn());
@@ -311,6 +334,10 @@ static esp_err_t statusHandler(httpd_req_t *req) {
   } else {
     row("SD card", "not detected");
   }
+  if (recordingActive()) {
+    row("Recording", recordingDir() + ", " + String(recordingFrames()) + " frames, " +
+                         String(recordingFps(), 1) + " fps");
+  }
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
   // "app0" is an ESP-IDF partition label, which tells a reader nothing. There
@@ -350,29 +377,6 @@ static esp_err_t statusHandler(httpd_req_t *req) {
     row("Update password", stored.otaPassword.isEmpty() ? "none set" : stored.otaPassword);
   }
   body += "</table>";
-
-  if (sdMounted()) {
-    SdEntry entries[20];
-    int total = 0;
-    const int shown = sdListRoot(entries, 20, &total);
-
-    body += "<h2 style=\"margin-top:22px\">Card contents</h2>";
-    if (total == 0) {
-      body += "<p class=sub>Root directory is empty.</p>";
-    } else {
-      body += "<table>";
-      for (int i = 0; i < shown; i++) {
-        const String size = entries[i].isDir
-                                ? String("directory")
-                                : String((uint32_t)(entries[i].size / 1024)) + " KB";
-        body += "<tr><th>" + htmlEscape(entries[i].name) + "</th><td>" + size + "</td></tr>";
-      }
-      body += "</table>";
-      if (total > shown) {
-        body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
-      }
-    }
-  }
 
   body += "<div class=actions><a class=btn href=\"/restart\">Restart camera</a></div>";
   return sendShell(req, "/status", body);
@@ -746,6 +750,7 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t updpage = {"/update",  HTTP_GET,  updatePageHandler, nullptr};
   httpd_uri_t updpost = {"/update",  HTTP_POST, updatePostHandler, nullptr};
   httpd_uri_t flash   = {"/flash",   HTTP_POST, flashHandler,      nullptr};
+  httpd_uri_t record  = {"/record",  HTTP_POST, recordHandler,     nullptr};
   httpd_uri_t setpage = {"/settings", HTTP_GET,  settingsPageHandler, nullptr};
   httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
   httpd_uri_t nets    = {"/networks", HTTP_GET,  networksHandler,     nullptr};
@@ -778,6 +783,7 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &updpage);
   registerUri(pageServer, &updpost);
   registerUri(pageServer, &flash);
+  registerUri(pageServer, &record);
   registerUri(pageServer, &setpage);
   registerUri(pageServer, &setpost);
   registerUri(pageServer, &nets);

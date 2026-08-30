@@ -8,6 +8,7 @@
 #include "camera.h"
 #include "config.h"
 #include "portal.h"
+#include "recording.h"
 #include "statusled.h"
 #include "storage.h"
 #include "secrets.h"
@@ -366,11 +367,16 @@ void setup() {
   // A camera fault must not take the network down with it. Staying reachable is
   // what makes the difference between diagnosing this over the air and going
   // back to the cable with the SD card out.
-  // Before flashInit: SDMMC claims its pins on mount, and setting up the flash
-  // LED afterwards keeps GPIO4 ours regardless of what the driver touched.
-  sdInit();
-  flashInit();
+  // Camera first. Mounting the card draws current and leaves the SDMMC
+  // peripheral running, and the sensor's power-up is the thing that has been
+  // failing. It is also the primary function: if only one of the two can come
+  // up, it should be the camera.
   cameraReady = cameraInit();
+
+  sdInit();
+
+  // After SDMMC, so GPIO4 ends up configured by us whatever the driver touched.
+  flashInit();
   if (!cameraReady) {
     Serial.println("CAMERA FAULT: sensor did not respond. Check the ribbon cable.");
     Serial.println("Continuing without it so the camera stays reachable.");
@@ -399,6 +405,7 @@ void loop() {
   // Drives the DNS responder and closes the window when its time is up.
   portalLoop();
   statusLedTick();
+  recordingTick();
 
   // Serial capture is kept as a fallback for when the network is the thing that
   // is broken, which is exactly when the browser view is no help.

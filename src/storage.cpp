@@ -151,6 +151,43 @@ int sdList(const String &path, SdEntry *out, int max, int *totalFound, int start
   return written;
 }
 
+int sdScan(const String &path, SdName *out, int max, int *totalFound, int *skipped) {
+  if (totalFound) *totalFound = 0;
+  if (skipped) *skipped = 0;
+  if (!mounted || !sdPathIsSafe(path)) return 0;
+
+  const String base = String(SD_MOUNT) + (path == "/" ? "" : path);
+  DIR *dir = opendir(base.c_str());
+  if (!dir) return 0;
+
+  int written = 0, seen = 0;
+  for (struct dirent *e = readdir(dir); e; e = readdir(dir)) {
+    if (e->d_name[0] == '.') continue;
+    // A name this long did not come from this firmware, which writes names of
+    // eleven characters at most. Counting it separately is what lets the page
+    // say so rather than showing a short list and calling it the whole story.
+    if (strlen(e->d_name) >= sizeof(out[0].name)) {
+      if (skipped) (*skipped)++;
+      continue;
+    }
+    seen++;
+    if (written >= max) continue;
+    strcpy(out[written].name, e->d_name);
+    out[written].isDir = (e->d_type == DT_DIR);
+    out[written].size = 0;
+    if (!out[written].isDir) {
+      struct stat st;
+      if (stat((base + "/" + e->d_name).c_str(), &st) == 0) {
+        out[written].size = (uint32_t)st.st_size;
+      }
+    }
+    written++;
+  }
+  closedir(dir);
+  if (totalFound) *totalFound = seen;
+  return written;
+}
+
 int sdListRoot(SdEntry *out, int max, int *totalFound) {
   return sdList("/", out, max, totalFound, 0);
 }

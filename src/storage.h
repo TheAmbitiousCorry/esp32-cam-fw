@@ -36,6 +36,22 @@ struct SdEntry {
 // set to the number actually present, which may exceed `max`.
 int sdListRoot(SdEntry *out, int max, int *totalFound);
 
+// A directory's entries in a form that can be held by the thousand. Names are
+// fixed buffers rather than Strings, so a whole directory sits in PSRAM instead
+// of competing for the internal heap everything else allocates from. Sorting a
+// listing means holding all of it at once, which is the only reason this exists
+// beside sdList.
+struct SdName {
+  char name[96];
+  uint32_t size;
+  bool isDir;
+};
+
+// Reads a whole directory at once. Returns how many entries were written.
+// *totalFound is how many there were, and *skipped counts names too long to
+// hold, which are reported rather than quietly dropped.
+int sdScan(const String &path, SdName *out, int max, int *totalFound, int *skipped);
+
 // Lists any directory, not just the root. Paths are rejected unless they start
 // with a slash and contain no "..", so a crafted request cannot walk outside
 // the card.

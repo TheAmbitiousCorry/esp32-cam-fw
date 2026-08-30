@@ -1581,9 +1581,13 @@ static esp_err_t downloadHandler(httpd_req_t *req) {
   if (name == "video.mjpeg" && cut > 0) {
     name = recordingFileName(path.substring(0, cut)) + ".mjpeg";
   }
-  const String disp = "attachment; filename=\"" + name + "\"";
+  // Same bytes either way; the difference is whether the browser saves them or
+  // draws them. The playback page needs a picture, the file listing needs a
+  // download, and asking for one should never give the other.
+  const bool view = queryParam(req, "view", "") == "1";
+  const String disp = (view ? "inline; filename=\"" : "attachment; filename=\"") + name + "\"";
 
-  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_type(req, view ? "image/jpeg" : "application/octet-stream");
   httpd_resp_set_hdr(req, "Content-Disposition", disp.c_str());
 
   esp_err_t res = ESP_OK;
@@ -1655,72 +1659,125 @@ static String queryParam(httpd_req_t *req, const char *key, const String &fallba
 // the page it was given.
 static constexpr int LIST_PAGE = 50;
 
-// What a listing needs to say about a recording beyond its name.
-struct RecMeta {
+// A row of the listing, held in bulk while the whole directory is sorted.
+struct FileRow {
+  SdName entry;
   uint32_t durMs;
   uint32_t bytes;
   bool known;
 };
 
-// Fills in the length and size of every recording on one page of a day.
-//
-// The day summary answers the whole page in one read. Anything missing from it
-// is a recording that never got to write its line, because it predates the
-// summary or because the power went before it stopped; that falls back to the
-// tail of its own index, which is written per frame and so survives both. The
-// fallback then appends what it found, so a given recording is only ever slow
-// once.
-static void loadDayMeta(const String &dayPath, const SdEntry *entries, int count,
-                        RecMeta *out) {
-  for (int i = 0; i < count; i++) out[i] = RecMeta{0, 0, false};
+// Sorting means holding a whole directory at once, so the table goes in PSRAM.
+// A day of motion triggers runs to hundreds of recordings; this is generous
+// enough that the cap is a backstop rather than a limit anyone meets.
+static constexpr int LIST_MAX = 2000;
 
+enum SortKey { SORT_NAME = 0, SORT_SIZE = 1, SORT_LENGTH = 2 };
+
+// The comparator's key lives here rather than in an argument because qsort has
+// nowhere to put one. Safe because the page server runs on a single task, so
+// only one listing is ever being sorted.
+static SortKey sortKey = SORT_NAME;
+static bool sortDesc = false;
+
+static int compareRows(const void *a, const void *b) {
+  const FileRow *x = (const FileRow *)a;
+  const FileRow *y = (const FileRow *)b;
+
+  // Directories first whichever way the sort runs, the way a file manager does
+  // it: reversing the order should not bury the way back up among the files.
+  if (x->entry.isDir != y->entry.isDir) return x->entry.isDir ? -1 : 1;
+
+  int c = 0;
+  if (sortKey == SORT_SIZE) {
+    // A recording's size is the footage inside it, not the directory entry,
+    // which is zero for every directory and would sort them all equal.
+    const uint32_t xs = x->known ? x->bytes : x->entry.size;
+    const uint32_t ys = y->known ? y->bytes : y->entry.size;
+    c = xs < ys ? -1 : xs > ys ? 1 : 0;
+  } else if (sortKey == SORT_LENGTH) {
+    c = x->durMs < y->durMs ? -1 : x->durMs > y->durMs ? 1 : 0;
+  }
+  // Name settles every other tie, so two recordings of the same length keep the
+  // same order between one page load and the next.
+  if (c == 0) c = strcmp(x->entry.name, y->entry.name);
+  return sortDesc ? -c : c;
+}
+
+// Fills in the length and size of every recording in a directory.
+//
+// The day summary answers all of them in one read. Anything missing from it is
+// a recording that never wrote its line, because it predates the summary or
+// because the power went before it stopped; that falls back to the tail of its
+// own index, which is written per frame and so survives both. What the fallback
+// finds is appended, including a zero for a recording that never got a frame, so
+// no recording is ever read the slow way twice.
+static void loadRecMeta(const String &dirPath, FileRow *rows, int count) {
   // Recordings are named for the time they started, so an all-digit name is what
-  // separates them from the day directories they sit beside in /rec.
-  bool candidate[LIST_PAGE] = {};
-  for (int i = 0; i < count && i < LIST_PAGE; i++) {
-    if (!entries[i].isDir || entries[i].name.isEmpty()) continue;
-    candidate[i] = true;
-    for (unsigned c = 0; c < entries[i].name.length(); c++) {
-      if (!isdigit(entries[i].name[c])) { candidate[i] = false; break; }
+  // separates them from the day directories they sit beside in /rec. Anything
+  // else is marked known straight away: there is nothing to look up for it, and
+  // nothing to retry on the next listing.
+  auto isRecording = [&](const FileRow &row) {
+    if (!row.entry.isDir || row.entry.name[0] == '\0') return false;
+    for (const char *c = row.entry.name; *c; c++) {
+      if (!isdigit((unsigned char)*c)) return false;
     }
+    return true;
+  };
+  for (int i = 0; i < count; i++) {
+    rows[i].durMs = 0;
+    rows[i].bytes = 0;
+    rows[i].known = !isRecording(rows[i]);
   }
 
-  // Recording names are six digits, so the summary parses as three numbers and
-  // the index reader already knows how to do that.
+  // Recording names are digits, so the summary parses as three numbers and the
+  // index reader already knows how to do that.
   void *fh = nullptr;
-  if (sdIndexOpen(dayPath + "/.day", &fh)) {
+  if (sdIndexOpen(dirPath + "/.day", &fh)) {
     uint32_t at = 0, durMs = 0, bytes = 0;
     while (sdIndexNext(fh, &at, &durMs, &bytes)) {
       for (int i = 0; i < count; i++) {
-        if (!out[i].known && candidate[i] &&
-            (uint32_t)entries[i].name.toInt() == at) {
-          out[i] = RecMeta{durMs, bytes, true};
-          break;
-        }
+        if (rows[i].known) continue;
+        if ((uint32_t)strtoul(rows[i].entry.name, nullptr, 10) != at) continue;
+        rows[i].durMs = durMs;
+        rows[i].bytes = bytes;
+        rows[i].known = true;
+        break;
       }
     }
     sdIndexClose(fh);
   }
 
+  int recovered = 0;
   for (int i = 0; i < count; i++) {
-    if (out[i].known || !candidate[i]) continue;
+    if (rows[i].known) continue;
 
     // The last index line carries the last frame's offset, length and time,
     // which is the whole answer: the recording ran that long and is that big.
-    String tail = sdReadTail(entries[i].path + "/index.txt", 96);
+    const String recPath = dirPath + "/" + rows[i].entry.name;
+    String tail = sdReadTail(recPath + "/index.txt", 96);
     while (tail.endsWith("\n") || tail.endsWith("\r")) tail.remove(tail.length() - 1);
-    if (tail.isEmpty()) continue;
     const int nl = tail.lastIndexOf('\n');
     const String last = nl >= 0 ? tail.substring(nl + 1) : tail;
 
     unsigned long off = 0, len = 0, ms = 0;
-    if (sscanf(last.c_str(), "%lu %lu %lu", &off, &len, &ms) != 3) continue;
+    if (tail.isEmpty() || sscanf(last.c_str(), "%lu %lu %lu", &off, &len, &ms) != 3) {
+      // Nothing readable in there. Recorded as zero rather than left unknown, so
+      // a recording the power cut off is not reopened on every listing forever.
+      off = len = ms = 0;
+    }
+    rows[i].durMs = (uint32_t)ms;
+    rows[i].bytes = (uint32_t)(off + len);
+    rows[i].known = true;
+    recovered++;
 
-    out[i] = RecMeta{(uint32_t)ms, (uint32_t)(off + len), true};
-    char line[80];
-    snprintf(line, sizeof(line), "%s %lu %lu\n", entries[i].name.c_str(), ms,
-             off + len);
-    sdAppendSmall(dayPath + "/.day", line);
+    char line[112];
+    snprintf(line, sizeof(line), "%s %lu %lu\n", rows[i].entry.name, ms, off + len);
+    sdAppendSmall(dirPath + "/.day", line);
+  }
+  if (recovered > 0) {
+    Serial.printf("files: recovered %d recording(s) from their index in %s\n",
+                  recovered, dirPath.c_str());
   }
 }
 
@@ -1729,10 +1786,26 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   if (!sdPathIsSafe(path)) path = "/";
   const int startAt = max(0L, queryParam(req, "start", "0").toInt());
 
+  const String sortParam = queryParam(req, "sort", "name");
+  const String orderParam = queryParam(req, "order", "asc");
+  sortKey = sortParam == "size"     ? SORT_SIZE
+            : sortParam == "length" ? SORT_LENGTH
+                                    : SORT_NAME;
+  sortDesc = (orderParam == "desc");
+  // Carried by every link on the page, so paging and stepping into a directory
+  // keep the order the person chose instead of snapping back to the default.
+  const String sortQS = "&sort=" + String(sortKey == SORT_SIZE     ? "size"
+                                          : sortKey == SORT_LENGTH ? "length"
+                                                                   : "name") +
+                        "&order=" + String(sortDesc ? "desc" : "asc");
+
   // /rec holds a directory per day; a day holds recordings. Both are rendered
   // with the punctuation put back, since the names are stored without it.
   const bool atRecRoot = (path == "/rec");
   const bool inDay = path.startsWith("/rec/") && path.length() == 15;
+  // A recording normally sits in a day directory, but one made before the clock
+  // reached an NTP server is numbered and sits in /rec beside the days.
+  const bool holdsRecordings = inDay || atRecRoot;
 
   String body = "<h1>Files</h1>";
   if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
@@ -1747,7 +1820,7 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
   if (path != "/") {
     int cut = path.lastIndexOf('/');
     const String parent = cut <= 0 ? "/" : path.substring(0, cut);
-    nav += "<a class=btn href=\"/files?path=" + htmlEscape(parent) + "\">" +
+    nav += "<a class=btn href=\"/files?path=" + htmlEscape(parent) + sortQS + "\">" +
            icon("up") + "Up</a>";
   }
   if (!nav.isEmpty()) body += "<div class=actions>" + nav + "</div>";
@@ -1763,27 +1836,76 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
             "if (d) location = '/files?path=/rec/' + d; };</script>";
   }
 
-  static constexpr int PAGE = LIST_PAGE;
-  SdEntry entries[PAGE];
-  int total = 0;
-  const int shown = sdList(path, entries, PAGE, &total, startAt);
-
-  if (total == 0) {
-    body += "<p class=sub>Nothing here.</p>";
+  FileRow *rows = (FileRow *)ps_malloc(sizeof(FileRow) * LIST_MAX);
+  if (!rows) {
+    body += "<p class=err>Not enough memory to list this directory.</p>";
     return sendShell(req, "/files", body);
   }
 
-  // One read for the page instead of two file opens per row. At this card's
-  // 150ms an open, that is what made listing a day take twelve seconds.
-  // A recording normally sits in a day directory, but one made before the clock
-  // reached an NTP server is numbered and sits in /rec beside the days.
-  const bool holdsRecordings = inDay || atRecRoot;
-  RecMeta metas[PAGE];
-  if (holdsRecordings) loadDayMeta(path, entries, shown, metas);
+  SdName *names = (SdName *)ps_malloc(sizeof(SdName) * LIST_MAX);
+  if (!names) {
+    free(rows);
+    body += "<p class=err>Not enough memory to list this directory.</p>";
+    return sendShell(req, "/files", body);
+  }
+
+  int total = 0, tooLong = 0;
+  const int held = sdScan(path, names, LIST_MAX, &total, &tooLong);
+  for (int i = 0; i < held; i++) rows[i].entry = names[i];
+  free(names);
+
+  if (total == 0) {
+    free(rows);
+    body += "<p class=sub>Nothing here.</p>";
+    if (tooLong > 0) {
+      body += "<p class=err>" + String(tooLong) +
+              " item(s) have names too long to list.</p>";
+    }
+    return sendShell(req, "/files", body);
+  }
+
+  // Metadata for the whole directory rather than for one page, because sorting
+  // by length or size has to compare rows that are not on the page yet.
+  if (holdsRecordings) {
+    loadRecMeta(path, rows, held);
+  } else {
+    for (int i = 0; i < held; i++) {
+      rows[i].durMs = 0;
+      rows[i].bytes = 0;
+      rows[i].known = false;
+    }
+  }
+
+  qsort(rows, held, sizeof(FileRow), compareRows);
+
+  static constexpr int PAGE = LIST_PAGE;
+  const int shown = min(PAGE, max(0, held - startAt));
+  const String prefix = (path == "/" ? String("/") : path + "/");
+
+  // Sorting is a GET, so the order is in the address bar: it survives a reload,
+  // it can be bookmarked, and the Back button undoes it.
+  body += "<form method=get action=/files class=actions>"
+          "<input type=hidden name=path value=\"" + htmlEscape(path) + "\">"
+          "<label style=\"margin:0;align-self:center\">Sort by</label>"
+          "<select name=sort onchange=\"this.form.submit()\" style=\"width:auto\">";
+  const char *keys[] = {"name", "size", "length"};
+  const char *labels[] = {"Name", "Size", "Length"};
+  for (int k = 0; k < (holdsRecordings ? 3 : 2); k++) {
+    body += String("<option value=") + keys[k] + (sortKey == k ? " selected" : "") +
+            ">" + labels[k] + "</option>";
+  }
+  body += "</select>"
+          "<select name=order onchange=\"this.form.submit()\" style=\"width:auto\">"
+          "<option value=asc" + String(sortDesc ? "" : " selected") + ">Ascending</option>"
+          "<option value=desc" + String(sortDesc ? " selected" : "") + ">Descending</option>"
+          "</select></form>";
 
   body += "<form method=post action=/files><table>";
-  for (int i = 0; i < shown; i++) {
-    String label = entries[i].name;
+  for (int i = startAt; i < startAt + shown; i++) {
+    const FileRow &row = rows[i];
+    const String name = row.entry.name;
+    const String full = prefix + name;
+    String label = name;
     String action;
 
     if (inDay && label.length() == 6) {
@@ -1792,15 +1914,15 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
               label.substring(4, 6);
     }
 
-    if (holdsRecordings && metas[i].known) {
-      const long durMs = metas[i].durMs;
+    if (holdsRecordings && row.known && row.bytes > 0) {
+      const long durMs = row.durMs;
 
       String ends;
       // Start comes from the directory name; the end is start plus duration.
-      if (entries[i].name.length() == 6 && durMs > 0) {
-        const int h = entries[i].name.substring(0, 2).toInt();
-        const int m = entries[i].name.substring(2, 4).toInt();
-        const int sec = entries[i].name.substring(4, 6).toInt();
+      if (name.length() == 6 && durMs > 0) {
+        const int h = name.substring(0, 2).toInt();
+        const int m = name.substring(2, 4).toInt();
+        const int sec = name.substring(4, 6).toInt();
         long endSec = h * 3600L + m * 60L + sec + (durMs + 500) / 1000;
         endSec %= 86400L;
         char buf[16];
@@ -1810,60 +1932,67 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
       }
 
       action = "<span class=sub>" + String(durMs / 1000.0, 1) + "s" + ends + "</span> " +
-               "<span class=sub>" + icon("disk") + formatSize(metas[i].bytes) +
-               "</span> ";
+               "<span class=sub>" + icon("disk") + formatSize(row.bytes) + "</span> ";
       action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Play this "
-                "recording in the browser\" href=\"/play?dir=" +
-                htmlEscape(entries[i].path) + "\">" + icon("play") + "Play</a> ";
+                "recording in the browser\" href=\"/play?dir=" + htmlEscape(full) +
+                "\">" + icon("play") + "Play</a> ";
       // The video is inside the directory, so without this the only way to keep
       // a recording was to open it and find the file by hand.
       action += "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download this "
-                "recording as an AVI file\" href=\"/video?dir=" +
-                htmlEscape(entries[i].path) + "\">" + icon("down") + "</a>";
-    } else if (inDay && entries[i].isDir) {
-      // Only inside a day: a directory in /rec is usually a day, not a recording.
-      // A directory in a day with no readable index is a recording that was cut
-      // off before it wrote a single frame. Saying so beats an empty cell.
+                "recording as an AVI file\" href=\"/video?dir=" + htmlEscape(full) +
+                "\">" + icon("down") + "</a>";
+    } else if (inDay && row.entry.isDir) {
+      // A directory in a day with nothing readable in it is a recording that was
+      // cut off before it wrote a frame. Saying so beats an empty cell.
       action = "<span class=sub>no frames</span>";
     }
 
-    String cell = icon(entries[i].isDir ? "folder" : "image") + htmlEscape(label);
-    if (entries[i].isDir) {
-      cell = "<a href=\"/files?path=" + htmlEscape(entries[i].path) + "\">" + cell + "</a>";
+    String cell = icon(row.entry.isDir ? "folder" : "image") + htmlEscape(label);
+    if (row.entry.isDir) {
+      cell = "<a href=\"/files?path=" + htmlEscape(full) + sortQS + "\">" + cell + "</a>";
     }
 
     String size;
-    if (entries[i].isDir) {
+    if (row.entry.isDir) {
       size = action;
     } else {
-      size = "<span class=sub>" + icon("disk") + formatSize(entries[i].size) +
+      size = "<span class=sub>" + icon("disk") + formatSize(row.entry.size) +
              "</span> "
              "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download this "
-             "file\" href=\"/download?path=" + htmlEscape(entries[i].path) +
-             "\">" + icon("down") + "</a>";
+             "file\" href=\"/download?path=" + htmlEscape(full) + "\">" +
+             icon("down") + "</a>";
     }
 
     body += "<tr><td style=\"padding-right:12px\">"
-            "<input type=checkbox name=f value=\"" + htmlEscape(entries[i].path) +
+            "<input type=checkbox name=f value=\"" + htmlEscape(full) +
             "\" style=\"width:auto\"></td>"
             "<th>" + cell + "</th><td>" + size + "</td></tr>";
   }
   body += "</table>";
+  free(rows);
 
   // Paging rather than a silent cap. A truncated list that does not say so reads
   // as missing footage.
-  if (total > PAGE) {
+  if (held > PAGE) {
     body += "<div class=actions>";
     if (startAt > 0) {
-      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + "&start=" +
-              String(max(0, startAt - PAGE)) + "\">Previous</a>";
+      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + sortQS +
+              "&start=" + String(max(0, startAt - PAGE)) + "\">Previous</a>";
     }
-    if (startAt + shown < total) {
-      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + "&start=" +
-              String(startAt + PAGE) + "\">Next</a>";
+    if (startAt + shown < held) {
+      body += "<a class=btn href=\"/files?path=" + htmlEscape(path) + sortQS +
+              "&start=" + String(startAt + PAGE) + "\">Next</a>";
     }
     body += "<span class=sub style=\"align-self:center\">" + String(startAt + 1) +
-            " to " + String(startAt + shown) + " of " + String(total) + "</span></div>";
+            " to " + String(startAt + shown) + " of " + String(held) + "</span></div>";
+  }
+  if (held < total) {
+    body += "<p class=err>" + String(total - held) +
+            " more items are here than this page can sort at once.</p>";
+  }
+  if (tooLong > 0) {
+    body += "<p class=err>" + String(tooLong) +
+            " item(s) have names too long to list.</p>";
   }
 
   body += "<div class=actions>"

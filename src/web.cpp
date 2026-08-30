@@ -453,9 +453,12 @@ async function refreshRec() {
     rb.className = '';
   }
 
-  // Change against the threshold, so the number means something without
-  // remembering what was set on another page.
-  pct.textContent = s.motion ? ' ' + s.change + '/' + s.threshold + '%' : ' Record';
+  // The button says what pressing it will do. It used to show the motion
+  // reading instead, which meant that with motion detection on it read
+  // "0/15%" whatever was happening: it never named its own action, and
+  // pressing it changed nothing you could see except a small dot. The reading
+  // moved to the line below, where a number belongs.
+  pct.textContent = s.active ? ' Stop' : ' Record';
 
   // Show where auto has settled, so a disabled slider still reads as working.
   const auto = document.getElementById('autoimg');
@@ -467,15 +470,18 @@ async function refreshRec() {
     if (lab) lab.textContent = s.ael + ' (auto, scene ' + s.lux + '/255)';
   }
 
+  // Everything the button used to try to say, said in full.
+  const seen = s.change + '/' + s.threshold + '% of the scene';
   if (s.active) {
     stats.textContent = s.frames + ' frames  ' + s.fps.toFixed(1) + ' fps' +
-                        (s.triggered ? '  motion triggered' : '  started by hand');
+                        (s.triggered ? '  motion triggered' : '  started by hand') +
+                        (s.cardless ? '  no card, whoever is watching keeps it' : '');
   } else if (!s.motion) {
     stats.textContent = 'Motion recording off';
   } else if (!s.armed) {
-    stats.textContent = 'Outside schedule  ' + s.preSecs + 's history';
+    stats.textContent = 'Outside schedule  ' + seen + '  ' + s.preSecs + 's history';
   } else {
-    stats.textContent = 'Watching  ' + s.preSecs + 's history';
+    stats.textContent = 'Watching  ' + seen + '  ' + s.preSecs + 's history';
   }
 }
 
@@ -704,7 +710,8 @@ static esp_err_t indexHandler(httpd_req_t *req) {
                  "red while recording, green while watching for motion\" class=\"") +
           (recordingActive() ? "on" : "") + "\">" +
           "<span id=recdot class=dot-off>" + icon("dot") + "</span>"
-          "<span id=recpct></span></button></div>";
+          "<span id=recpct>" + String(recordingActive() ? " Stop" : " Record") +
+          "</span></button></div>";
   body += "<p id=recstats></p>";
 
   {

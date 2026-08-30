@@ -70,9 +70,24 @@ static bool cameraTry() {
   sensor_t *sensor = esp_camera_sensor_get();
   Serial.printf("sensor PID 0x%02x (0x26 is OV2640)\n", sensor->id.PID);
 
+  // A frame has to actually arrive before this counts as working. The sensor
+  // answers on its control bus over two wires; the pixels come back over ten
+  // more plus a clock. Those can fail independently, and when they do the
+  // sensor still identifies itself perfectly while no image ever arrives. The
+  // old warmup threw away whatever it got, so a camera in that state reported
+  // itself detected and then refused every capture, which sends anyone looking
+  // at it hunting for a software fault that is not there.
+  bool gotFrame = false;
   for (int i = 0; i < WARMUP_FRAMES; i++) {
     camera_fb_t *fb = esp_camera_fb_get();
-    if (fb) esp_camera_fb_return(fb);
+    if (!fb) continue;
+    if (fb->len > 0) gotFrame = true;
+    esp_camera_fb_return(fb);
+  }
+  if (!gotFrame) {
+    Serial.println("sensor answered but sent no frame: check the ribbon seating "
+                   "and the supply");
+    return false;
   }
   return true;
 }

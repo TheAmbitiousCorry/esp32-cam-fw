@@ -52,6 +52,18 @@ static int preCount = 0;
 
 static bool (*activityCheck)(camera_fb_t *) = nullptr;
 static uint32_t activityQuietMs = 0;
+static uint32_t lastActivityCheck = 0;
+
+// Decoding a frame to compare it costs real time. Asking once per recorded frame
+// meant 25 JPEG decodes a second, which starved the web server to the point
+// where a page took twenty seconds. Movement does not need checking faster than
+// it happens.
+static constexpr uint32_t ACTIVITY_INTERVAL_MS = 400;
+
+// A recording that extends while anything moves has no natural end. Traffic past
+// a window, or a sensitivity set too low, would otherwise record until the card
+// filled.
+static constexpr uint32_t MAX_RECORDING_MS = 5UL * 60UL * 1000UL;
 static bool triggered = false;
 
 static uint32_t grabTotalMs = 0;
@@ -135,6 +147,7 @@ uint32_t prerollSeconds() {
 
 void recordingExtend(uint32_t quietSeconds) {
   if (!active) return;
+  if (millis() - startedAt > MAX_RECORDING_MS) return;  // long enough
   const uint32_t target = millis() + quietSeconds * 1000;
   if ((int32_t)(target - stopAt) > 0) stopAt = target;
 }
@@ -214,6 +227,7 @@ bool recordingStart(uint32_t seconds) {
   startedAt = millis();
   stopAt = startedAt + seconds * 1000;
   lastFrameAt = 0;
+  lastActivityCheck = 0;
   frames = 0;
   bytes = 0;
   grabTotalMs = 0;
@@ -288,9 +302,12 @@ void recordingTick() {
   frames++;
   bytes += written;
 
-  // Asked on the frame already in hand, so extending a recording costs no extra
-  // capture and no contention for the camera.
-  if (activityCheck && activityCheck(fb)) recordingExtend(activityQuietMs / 1000);
+  // Asked on the frame already in hand, so extending costs no extra capture, and
+  // asked at the rate movement happens rather than the rate frames arrive.
+  if (activityCheck && millis() - lastActivityCheck >= ACTIVITY_INTERVAL_MS) {
+    lastActivityCheck = millis();
+    if (activityCheck(fb)) recordingExtend(activityQuietMs / 1000);
+  }
 
   // Publish a copy so a viewer sees what is being recorded without competing for
   // the camera. Allocated once, on the first frame, sized for this recording.

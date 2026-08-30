@@ -15,6 +15,11 @@ static constexpr int BLOCKS = GRID_W * GRID_H;
 static constexpr int BLOCK_DELTA = 14;
 
 static uint8_t previous[BLOCKS];
+
+// Allocated once and kept. This runs several times a second, and a ps_malloc
+// and free of the same size on every call is pure churn.
+static uint8_t *scratch = nullptr;
+static size_t scratchSize = 0;
 static bool havePrevious = false;
 static uint8_t sensitivity = 20;  // percent of blocks that must change
 static uint8_t lastChange = 0;
@@ -41,12 +46,15 @@ bool motionCheck(camera_fb_t *fb) {
   const int h = fb->height / 8;
   if (w < GRID_W || h < GRID_H) return false;
 
-  uint8_t *rgb = (uint8_t *)ps_malloc(w * h * 2);
-  if (!rgb) return false;
-  if (!jpg2rgb565(fb->buf, fb->len, rgb, JPG_SCALE_8X)) {
-    free(rgb);
-    return false;
+  const size_t need = (size_t)w * h * 2;
+  if (need > scratchSize) {
+    if (scratch) free(scratch);
+    scratch = (uint8_t *)ps_malloc(need);
+    scratchSize = scratch ? need : 0;
   }
+  if (!scratch) return false;
+  uint8_t *rgb = scratch;
+  if (!jpg2rgb565(fb->buf, fb->len, rgb, JPG_SCALE_8X)) return false;
 
   uint32_t sums[BLOCKS] = {0};
   uint32_t counts[BLOCKS] = {0};
@@ -66,8 +74,6 @@ bool motionCheck(camera_fb_t *fb) {
       counts[idx]++;
     }
   }
-  free(rgb);
-
   uint8_t current[BLOCKS];
   for (int i = 0; i < BLOCKS; i++) {
     current[i] = counts[i] ? (uint8_t)(sums[i] / counts[i]) : 0;

@@ -127,6 +127,17 @@ static const char SHARED_CSS[] =
     "button.primary{background:#2a7;border-color:#2a7;color:#04140d;font-weight:600}"
     "p.sub{color:#999;font-size:13px;max-width:460px}"
     ".err{color:#f77;font-size:13px}"
+    // Tooltips on the element itself rather than the title attribute: title
+    // waits a second before appearing and cannot be styled. Hidden on touch,
+    // where there is no hover and the label has to carry the meaning.
+    "[data-tip]{position:relative}"
+    "[data-tip]::after{content:attr(data-tip);position:absolute;left:50%;"
+    "bottom:calc(100% + 7px);transform:translateX(-50%);white-space:nowrap;"
+    "background:#000;color:#eee;border:1px solid #3a3a3a;border-radius:5px;"
+    "padding:5px 8px;font-size:12px;font-weight:400;opacity:0;pointer-events:none;"
+    "transition:opacity .12s .35s;z-index:5}"
+    "[data-tip]:hover::after{opacity:1}"
+    "@media(hover:none){[data-tip]::after{display:none}}"
     "#rec svg{transition:color .2s}"
     ".dot-rec{color:#f55}.dot-armed{color:#2a7}.dot-off{color:#777}"
     "#recstats{color:#999;font-size:13px;margin:6px 0 0;"
@@ -257,9 +268,9 @@ static esp_err_t logoutHandler(httpd_req_t *req) {
 
 static const char INDEX_BODY[] = R"HTML(<div class=zoomwrap id=zw><img id="v" alt="live view"></div>
 <div class=actions>
-  <button type=button onclick="zoomOut()">Zoom out</button>
-  <button type=button onclick="zoomIn()">Zoom in</button>
-  <button type=button onclick="zoomReset()">Fit</button>
+  <button type=button onclick="zoomOut()" data-tip="Zoom out">&minus;</button>
+  <button type=button onclick="zoomIn()" data-tip="Zoom in. Click the picture to zoom towards that point">+</button>
+  <button type=button onclick="zoomReset()" data-tip="Fit the whole frame">Fit</button>
   <span id=zlabel class=sub style="align-self:center"></span>
 </div>
 <script>
@@ -691,9 +702,11 @@ static esp_err_t playPageHandler(httpd_req_t *req) {
   body += "<div class=zoomwrap id=zw><img id=p alt=\"recording\"></div>";
   body += "<input type=range id=scrub min=0 max=0 value=0 style=\"margin:14px 0\">";
   body += "<div class=actions>"
-          "<button type=button onclick=\"zoomOut()\">Zoom out</button>"
-          "<button type=button onclick=\"zoomIn()\">Zoom in</button>"
-          "<button type=button onclick=\"zoomReset()\">Fit</button>"
+          "<button type=button onclick=\"zoomOut()\" data-tip=\"Zoom out\">&minus;</button>"
+          "<button type=button onclick=\"zoomIn()\" data-tip=\"Zoom in. Click the "
+          "picture to zoom towards that point\">+</button>"
+          "<button type=button onclick=\"zoomReset()\" data-tip=\"Fit the whole "
+          "frame\">" + icon("zoom") + "</button>"
           "<span id=zlabel class=sub style=\"align-self:center\"></span></div>";
   body += "<div class=actions>"
           "<button id=pp class=primary>" + icon("play") + "Play</button>"
@@ -1026,6 +1039,9 @@ static esp_err_t statusHandler(httpd_req_t *req) {
                               ? "on at " + String(c.motionSensitivity) + "%, last frame " +
                                     String(motionLastChange()) + "%"
                               : "off");
+  }
+  if (failedRoutes > 0) {
+    row("Routes", String(failedRoutes) + " FAILED TO REGISTER");
   }
   row("Free heap", String(ESP.getFreeHeap()) + " bytes");
   row("Free PSRAM", String(ESP.getFreePsram()) + " bytes");
@@ -1365,8 +1381,9 @@ static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
       size = action;
     } else {
       size = String((uint32_t)(entries[i].size / 1024)) + " KB "
-             "<a class=btn style=\"padding:3px 9px\" href=\"/download?path=" +
-             htmlEscape(entries[i].path) + "\">" + icon("down") + "Save</a>";
+             "<a class=btn style=\"padding:3px 9px\" data-tip=\"Download this "
+             "file\" href=\"/download?path=" + htmlEscape(entries[i].path) +
+             "\">" + icon("down") + "</a>";
     }
 
     body += "<tr><td style=\"padding-right:12px\">"

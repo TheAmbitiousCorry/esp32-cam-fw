@@ -1,15 +1,53 @@
+#include <Preferences.h>
+#include <time.h>
+
 #include "auth.h"
 
 static constexpr int MAX_SESSIONS = 4;
-static constexpr uint32_t SESSION_LIFETIME_MS = 12UL * 60UL * 60UL * 1000UL;
+static constexpr uint32_t SESSION_LIFETIME_S = 12UL * 60UL * 60UL;
 static constexpr size_t TOKEN_HEX_LEN = 32;
+static constexpr char NVS_NAMESPACE[] = "camauth";
 
+// Expiry is wall-clock rather than millis(), because millis() restarts with the
+// device and these now have to survive that.
 struct Session {
   char token[TOKEN_HEX_LEN + 1];
-  uint32_t expiresAt;
+  uint32_t expiresAt;  // unix seconds
 };
 
 static Session sessions[MAX_SESSIONS];
+static bool loaded = false;
+
+// Sessions used to live only in RAM, so every reboot signed everyone out. That
+// looked like principle and was mostly friction: this camera reboots on every
+// settings change and every firmware update, and the threat it defended against
+// is someone with a stolen cookie on the same home network.
+static void persist() {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NAMESPACE, false)) return;
+  prefs.putBytes("s", sessions, sizeof(sessions));
+  prefs.end();
+}
+
+static void load() {
+  if (loaded) return;
+  loaded = true;
+  Preferences prefs;
+  if (!prefs.begin(NVS_NAMESPACE, true)) return;
+  if (prefs.getBytesLength("s") == sizeof(sessions)) {
+    prefs.getBytes("s", sessions, sizeof(sessions));
+  }
+  prefs.end();
+}
+
+// Before the clock syncs, time() is near zero and every session would look
+// expired. Treating an unsynced clock as "cannot judge" keeps a valid cookie
+// working through the first seconds of a boot.
+static bool clockUsable() { return time(nullptr) > 1704067200; }  // 2024-01-01
+
+static bool expired(const Session &s) {
+  return clockUsable() && s.expiresAt != 0 && (uint32_t)time(nullptr) > s.expiresAt;
+}
 
 static String randomToken() {
   static const char digits[] = "0123456789abcdef";
@@ -23,14 +61,14 @@ static String randomToken() {
 }
 
 String authCreateSession() {
+  load();
   const String token = randomToken();
-  const uint32_t now = millis();
 
   // Reuse an empty or expired slot, otherwise evict whichever expires soonest.
   int slot = 0;
   uint32_t soonest = UINT32_MAX;
   for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (sessions[i].token[0] == '\0' || (int32_t)(now - sessions[i].expiresAt) >= 0) {
+    if (sessions[i].token[0] == '\0' || expired(sessions[i])) {
       slot = i;
       break;
     }
@@ -42,7 +80,8 @@ String authCreateSession() {
 
   strncpy(sessions[slot].token, token.c_str(), TOKEN_HEX_LEN);
   sessions[slot].token[TOKEN_HEX_LEN] = '\0';
-  sessions[slot].expiresAt = now + SESSION_LIFETIME_MS;
+  sessions[slot].expiresAt = clockUsable() ? (uint32_t)time(nullptr) + SESSION_LIFETIME_S : 0;
+  persist();
   return token;
 }
 
@@ -76,13 +115,13 @@ static String cookieToken(httpd_req_t *req) {
 }
 
 bool authIsSignedIn(httpd_req_t *req) {
+  load();
   const String token = cookieToken(req);
   if (token.length() != TOKEN_HEX_LEN) return false;
 
-  const uint32_t now = millis();
   for (int i = 0; i < MAX_SESSIONS; i++) {
     if (sessions[i].token[0] == '\0') continue;
-    if ((int32_t)(now - sessions[i].expiresAt) >= 0) continue;
+    if (expired(sessions[i])) continue;
 
     uint8_t diff = 0;
     for (size_t c = 0; c < TOKEN_HEX_LEN; c++) diff |= (uint8_t)(sessions[i].token[c] ^ token[c]);
@@ -92,12 +131,23 @@ bool authIsSignedIn(httpd_req_t *req) {
 }
 
 void authEndSession(httpd_req_t *req) {
+  load();
   const String token = cookieToken(req);
+  bool changed = false;
   for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (token.length() == TOKEN_HEX_LEN && strncmp(sessions[i].token, token.c_str(), TOKEN_HEX_LEN) == 0) {
+    if (token.length() == TOKEN_HEX_LEN &&
+        strncmp(sessions[i].token, token.c_str(), TOKEN_HEX_LEN) == 0) {
       sessions[i].token[0] = '\0';
+      changed = true;
     }
   }
+  if (changed) persist();
+}
+
+void authEndAllSessions() {
+  memset(sessions, 0, sizeof(sessions));
+  loaded = true;
+  persist();
 }
 
 String authSessionCookie(const String &token) {

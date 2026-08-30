@@ -15,6 +15,13 @@ static uint32_t windowClosesAt = 0;
 static int windowChannel = 0;
 static bool openAp(int channel);
 static uint32_t windowChannelCheckedAt = 0;
+static uint32_t stationHealthySince = 0;
+
+// The access point exists to get someone in when the network does not work.
+// While the station is connected there is already a way in, and sharing one
+// radio between both costs roughly seven times the latency. So the window runs
+// its full length only when it is actually needed.
+static constexpr uint32_t STATION_HEALTHY_MS = 60UL * 1000UL;
 
 // Long enough to fetch a laptop from another room, short enough that the camera
 // is not broadcasting an access point all day.
@@ -212,6 +219,20 @@ void portalLoop() {
     return;
   }
 
+  // Close early once the station has held a connection for a minute. A drop
+  // resets the clock, and a station that never recovers takes the camera through
+  // its offline reboot, which opens a fresh window.
+  if (WiFi.status() == WL_CONNECTED) {
+    if (stationHealthySince == 0) stationHealthySince = millis();
+    if (millis() - stationHealthySince > STATION_HEALTHY_MS) {
+      Serial.println("station healthy, closing the window early to free the radio");
+      stopApWindow();
+      return;
+    }
+  } else {
+    stationHealthySince = 0;
+  }
+
   // A router that changes channel takes the station with it and leaves the
   // access point stranded on the old one, still broadcasting but unreachable.
   // Follow it, so the recovery path stays a recovery path.
@@ -264,6 +285,7 @@ bool startApWindow() {
 
   windowRunning = true;
   windowClosesAt = millis() + AP_WINDOW_MS;
+  stationHealthySince = 0;
   Serial.printf("maintenance window open for %lu minutes on ch%d: join \"%s\", "
                 "then http://%s and sign in\n",
                 (unsigned long)(AP_WINDOW_MS / 60000), staChannel, apSsid.c_str(),

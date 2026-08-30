@@ -9,13 +9,6 @@ Domain tags are provisional: no spec directory exists yet.
 
 ## Now
 
-- **The card can be cleared without taking it out**: browse what is on the card
-  and delete it from the web interface. Why now: the card arrived full of
-  H2testw artifacts, there is no card reader to hand, and an inserted card blocks
-  USB flashing, so firmware is the only way to free the space that everything
-  below depends on. The same page becomes the recordings browser.
-  Domains: storage, web. Appetite: small.
-
 - **Footage survives on the SD card and can be played back**: stated goal, and the
   half of "security camera" that outlives a power cut. Why now: motion detection is
   worth nothing until there is somewhere for a trigger to write to, so storage

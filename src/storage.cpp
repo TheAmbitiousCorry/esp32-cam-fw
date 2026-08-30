@@ -77,6 +77,7 @@ int sdListRoot(SdEntry *out, int max, int *totalFound) {
     seen++;
     if (written < max) {
       out[written].name = entry.name();
+      out[written].path = entry.path();
       out[written].size = entry.size();
       out[written].isDir = entry.isDirectory();
       written++;
@@ -87,4 +88,41 @@ int sdListRoot(SdEntry *out, int max, int *totalFound) {
 
   if (totalFound) *totalFound = seen;
   return written;
+}
+
+static constexpr int MAX_DELETE_DEPTH = 8;
+
+static bool removeAt(const String &path, int depth) {
+  if (depth > MAX_DELETE_DEPTH) return false;
+
+  File f = SD_MMC.open(path);
+  if (!f) return false;
+
+  if (!f.isDirectory()) {
+    f.close();
+    return SD_MMC.remove(path);
+  }
+
+  // Collect children before deleting any of them: removing entries while
+  // iterating the same directory handle is undefined on FATFS.
+  static constexpr int MAX_CHILDREN = 64;
+  String children[MAX_CHILDREN];
+  int count = 0;
+  for (File child = f.openNextFile(); child && count < MAX_CHILDREN;
+       child = f.openNextFile()) {
+    children[count++] = child.path();
+    child.close();
+  }
+  f.close();
+
+  bool ok = true;
+  for (int i = 0; i < count; i++) {
+    if (!removeAt(children[i], depth + 1)) ok = false;
+  }
+  return SD_MMC.rmdir(path) && ok;
+}
+
+bool sdRemove(const String &path) {
+  if (!mounted || path.isEmpty() || path == "/") return false;
+  return removeAt(path, 0);
 }

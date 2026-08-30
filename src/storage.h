@@ -27,6 +27,7 @@ bool sdWritable();
 // card", and the same call the recordings browser will need later.
 struct SdEntry {
   String name;
+  String path;  // full path, which is what delete needs
   uint64_t size;
   bool isDir;
 };
@@ -34,3 +35,7 @@ struct SdEntry {
 // Fills up to `max` entries and returns how many were written. `totalFound` is
 // set to the number actually present, which may exceed `max`.
 int sdListRoot(SdEntry *out, int max, int *totalFound);
+
+// Removes a file, or a directory and everything under it. Recursion is depth
+// limited: a corrupt filesystem should fail a delete, not exhaust the stack.
+bool sdRemove(const String &path);

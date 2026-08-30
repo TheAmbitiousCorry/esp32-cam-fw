@@ -105,8 +105,8 @@ static esp_err_t sendHtml(httpd_req_t *req, const String &body) {
 static esp_err_t sendShell(httpd_req_t *req, const char *active, const String &main) {
   struct Item { const char *href; const char *label; };
   static const Item items[] = {
-      {"/", "Live view"}, {"/status", "Status"}, {"/settings", "Settings"},
-      {"/update", "Firmware"}};
+      {"/", "Live view"}, {"/files", "Files"}, {"/status", "Status"},
+      {"/settings", "Settings"}, {"/update", "Firmware"}};
 
   String nav = "<div class=app><aside><div class=brand>" + htmlEscape(cameraName) + "</div>";
   for (const Item &it : items) {
@@ -482,6 +482,106 @@ static esp_err_t networksHandler(httpd_req_t *req) {
   return httpd_resp_send(req, json.c_str(), json.length());
 }
 
+static esp_err_t sendFiles(httpd_req_t *req, const String &notice) {
+  String body = "<h1>Files</h1>";
+  if (!notice.isEmpty()) body += "<p class=sub>" + htmlEscape(notice) + "</p>";
+
+  if (!sdMounted()) {
+    body += "<p class=err>No SD card detected.</p>";
+    return sendShell(req, "/files", body);
+  }
+
+  static constexpr int MAX_LISTED = 64;
+  SdEntry entries[MAX_LISTED];
+  int total = 0;
+  const int shown = sdListRoot(entries, MAX_LISTED, &total);
+
+  const uint64_t freeMb = (sdTotalBytes() - sdUsedBytes()) / (1024ULL * 1024ULL);
+  body += "<p class=sub>" + String((uint32_t)(sdTotalBytes() / (1024ULL * 1024ULL))) +
+          " MB card, " + String((uint32_t)freeMb) + " MB free.</p>";
+
+  if (total == 0) {
+    body += "<p class=sub>The card is empty.</p>";
+    return sendShell(req, "/files", body);
+  }
+
+  body += "<form method=post action=/files><table>";
+  for (int i = 0; i < shown; i++) {
+    const String size = entries[i].isDir
+                            ? String("directory")
+                            : String((uint32_t)(entries[i].size / 1024)) + " KB";
+    body += "<tr><td style=\"padding-right:12px\">"
+            "<input type=checkbox name=f value=\"" + htmlEscape(entries[i].path) +
+            "\" style=\"width:auto\"></td>"
+            "<th>" + htmlEscape(entries[i].name) + "</th>"
+            "<td>" + size + "</td></tr>";
+  }
+  body += "</table>";
+  if (total > shown) {
+    body += "<p class=sub>" + String(total - shown) + " more not listed.</p>";
+  }
+  body += "<div class=actions>"
+          "<button type=button id=all>Select all</button>"
+          "<button type=submit id=del>Delete selected</button></div></form>";
+
+  body += R"HTML(<script>
+const boxes = () => [...document.querySelectorAll('input[name=f]')];
+document.getElementById('all').onclick = () => {
+  const target = !boxes().every(b => b.checked);
+  boxes().forEach(b => { b.checked = target; });
+};
+// Not protection, just a guard against a misclick on a page that will later
+// list footage rather than test files.
+document.getElementById('del').onclick = e => {
+  const n = boxes().filter(b => b.checked).length;
+  if (n === 0) { e.preventDefault(); return; }
+  if (!confirm('Delete ' + n + ' item' + (n === 1 ? '' : 's') + '? This cannot be undone.')) {
+    e.preventDefault();
+  }
+};
+</script>)HTML";
+  return sendShell(req, "/files", body);
+}
+
+static esp_err_t filesPageHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+  return sendFiles(req, "");
+}
+
+static esp_err_t filesDeleteHandler(httpd_req_t *req) {
+  if (!authGuardPage(req)) return ESP_OK;
+
+  String body;
+  if (!readBody(req, body, 8192)) return sendFiles(req, "Nothing to do.");
+
+  // formField returns the first match only, and a multi-select posts one f= per
+  // item, so walk the pairs directly.
+  int removed = 0, failed = 0;
+  int pos = 0;
+  while (pos < (int)body.length()) {
+    int amp = body.indexOf('&', pos);
+    if (amp < 0) amp = body.length();
+    const String pair = body.substring(pos, amp);
+    const int eq = pair.indexOf('=');
+    if (eq > 0 && urlDecode(pair.substring(0, eq)) == "f") {
+      const String path = urlDecode(pair.substring(eq + 1));
+      if (sdRemove(path)) {
+        removed++;
+      } else {
+        failed++;
+        Serial.printf("could not delete %s\n", path.c_str());
+      }
+    }
+    pos = amp + 1;
+  }
+
+  String notice = String(removed) + " item" + (removed == 1 ? "" : "s") + " deleted";
+  if (failed > 0) notice += ", " + String(failed) + " could not be removed";
+  notice += ".";
+  Serial.printf("%s\n", notice.c_str());
+  return sendFiles(req, notice);
+}
+
 static esp_err_t settingsPageHandler(httpd_req_t *req) {
   if (!authGuardPage(req)) return ESP_OK;
   return sendSettings(req, "");
@@ -650,6 +750,8 @@ bool startWebServers(bool cameraOk) {
   httpd_uri_t setpost = {"/settings", HTTP_POST, settingsPostHandler, nullptr};
   httpd_uri_t nets    = {"/networks", HTTP_GET,  networksHandler,     nullptr};
   httpd_uri_t restart = {"/restart",  HTTP_GET,  restartHandler,      nullptr};
+  httpd_uri_t files   = {"/files",    HTTP_GET,  filesPageHandler,    nullptr};
+  httpd_uri_t filesdel = {"/files",   HTTP_POST, filesDeleteHandler,  nullptr};
   httpd_uri_t capture = {"/capture", HTTP_GET, captureHandler, nullptr};
   httpd_uri_t stream  = {"/stream",  HTTP_GET, streamHandler,  nullptr};
 
@@ -680,6 +782,8 @@ bool startWebServers(bool cameraOk) {
   registerUri(pageServer, &setpost);
   registerUri(pageServer, &nets);
   registerUri(pageServer, &restart);
+  registerUri(pageServer, &files);
+  registerUri(pageServer, &filesdel);
   registerUri(pageServer, &capture);
 
   // The stream gets its own server because a handler that never returns occupies

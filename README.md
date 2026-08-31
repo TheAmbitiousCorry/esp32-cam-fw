@@ -1,245 +1,230 @@
-<img src="docs/media/argus-eye.svg" alt="" width="52" align="right">
+<img src="docs/media/argus-eye.svg" width="72" align="right" alt="">
 
 # Argus Cam
 
-**Argus NVR compatible ESP32-CAM firmware.** Flash it once over USB, then set it
-up from your phone like any other device. No serial console, no config file, no
-credentials compiled in, and no cable ever again.
+Firmware that turns a $8 AI-Thinker ESP32-CAM into a camera that records by itself. It watches for motion, records to its own microSD card, serves live video and its recordings over HTTP, and keeps doing all of that when the network goes away.
 
-![Live view, the file browser, motion settings, and status](docs/media/argus-cam.gif)
+![Argus Cam in use](docs/media/argus-cam.gif)
 
-## It sets itself up
-
-A camera with no settings broadcasts its own open network, `ESP32CAM-Setup-XXXX`,
-named from its MAC so two cameras in a box are never the same one. Join it from
-a phone and the setup page opens by itself.
-
-It has already scanned for networks, so yours is in a list rather than something
-to type. It proposes a name for the camera, drawn from Greek myth and picked
-from the board's own MAC, so the same camera always suggests the same name and
-two of them never collide. Set a password, save, and the camera joins your
-network and disappears from the air.
-
-From then on it is `http://<name>.local`, and the only thing you ever needed a
-cable for was the first flash.
-
-**It stays reachable when the network does not.** The setup access point reopens
-for fifteen minutes after every restart, so a camera whose Wi-Fi has changed
-underneath it is still something you can walk up to, not something you take down
-from the wall. It closes on its own once the camera has held a connection for a
-minute, because both share one radio.
-
-**And when all else fails, three presses.** Hold the reset button for a second,
-three times, and it clears its settings and comes back as a new camera. No
-serial console, no reflash, and nothing to remember but the button already on
-the board.
+No cloud account, no phone app, no vendor. The camera holds its own footage and answers to anything that can speak HTTP.
 
 ## What it does
 
-**Live view** at 24 frames a second, with digital zoom that follows where you
-click and drag, and a still capture that can fire the flash for that one frame.
+- **Motion-triggered recording** with pre-roll, so the clip starts before the thing that triggered it.
+- **Live MJPEG stream** at up to 24fps at 640x480, plus single-frame snapshots.
+- **On-device recording browser** with a scrubbable player, per-frame seeking, and download as playable AVI.
+- **A web UI on the camera itself**: live view with digital zoom, image adjustment sliders, file browser, status page, settings, firmware upload.
+- **A JSON API** covering state, config, recordings, and firmware, so a recorder like [Argus NVR](https://github.com/TheAmbitiousCorry/argus-nvr) can manage a fleet of these.
+- **Browser-based setup**: a fresh camera raises its own Wi-Fi network and asks you three questions.
+- **Two independent firmware update paths**, with automatic rollback if a new build cannot reach the network.
 
-**Records to the SD card** on motion, keeping seconds of footage from *before*
-the trigger so an event does not start with the subject already in shot. A
-recording extends itself while movement continues and stops once the scene has
-been still. The threshold is shown against the live reading, so it can be set
-against what the camera is actually seeing, and a schedule decides when it arms.
+## What makes it different
 
-**Plays back in the browser**, scrubbing through a recording at the speed it was
-captured, with a date filter and sorting by name, size or length. Download one
-and it opens in any player: the frames are wrapped in a container on the way
-out, with nothing re-encoded and the real frame rate written into it.
+Most ESP32 camera projects stream video. This one is built to survive being left alone on a wall.
 
-**Adjusts its own exposure**, one ladder from bright to dark, moving only after
-two readings agree so a passing shadow does not swing the picture. It reports
-where it has settled, and what the sensor is actually doing rather than what was
-last stored.
+**Recordings survive a power cut.** Frames are written as concatenated JPEGs plus a text index, not as AVI. An AVI writes its index at the end, so an interrupted recording is an unplayable file. Here a power cut costs you the last frame, and everything before it still plays. AVI is generated on demand when you download a clip, from the index that is already on the card.
 
-**Exposes every setting** through the web interface and as JSON: resolution,
-quality, brightness, contrast, saturation, white balance, mirroring, flash
-brightness, motion sensitivity, schedule, retention.
+**One owner per scarce resource.** The camera has one sensor, one radio, and one SD bus. Two consumers calling for frames at once measured 230 frames captured against 4. So while a recording runs it is the only thing grabbing frames, and it publishes a copy of each frame behind a seqlock for live viewers to read. Watching a recording in progress costs no extra captures.
 
-**Ages footage out** to keep the card from filling, oldest first.
+**A failed update rolls itself back.** A new build boots on trial. It is only marked good once it has reached the network with its web servers answering. A build that boots but cannot get online reverts to the previous slot on the next restart, and the camera tells you it happened.
 
-**Announces itself** over mDNS as a camera rather than as another web server, so
-an aggregator can tell it apart from the router.
+**You cannot lock yourself out.** GPIO2 is shared between the SD card and the USB boot strap, so a card in the slot blocks USB flashing. That means one recovery path can fail and take flashing with it. So there are always two: USB and network OTA, plus a 15-minute setup access point that reopens after every restart, plus a physical factory reset (tap reset three times in five seconds).
 
-## An update cannot brick it
+**Numbers, not intuition.** [docs/principles.md](docs/principles.md) is a list of rules, each one paid for by a specific mistake, each with the measurement that produced it. Creating a file costs 142ms against 13ms to append to an open one. Removing one `delay(50)` from the main loop took recording from 16.2 to 24.7fps. Serving a frame took 1384ms until the client started sending the byte offset it already knew, then 127ms.
 
-New firmware goes over the air from the browser or from PlatformIO. An image is
-on trial until it reaches the network with its web server answering; one that
-restarts before confirming is discarded and the previous firmware runs again.
-The status page names the version it reverted from, so a failed update is
-something you are told about rather than something you discover.
+## What you need
 
-## It tells you the truth about itself
+| | |
+|---|---|
+| Board | AI-Thinker ESP32-CAM (OV2640 sensor, 4MB PSRAM) |
+| Programmer | FTDI/USB-TTL adapter at 3.3V, or an ESP32-CAM-MB dock |
+| Card | microSD, FAT32. Cards over 32GB usually ship exFAT and must be reformatted |
+| Power | **A supply that can actually deliver 5V at 500mA+.** Weak power is the single most common cause of every symptom here: the sensor not detected, Wi-Fi refusing to associate, random resets, boot loops |
+| Toolchain | [PlatformIO](https://platformio.org/) |
 
-Sensor state is asked of the driver rather than remembered from boot. The SD
-card is re-checked rather than assumed, and a card swapped while it runs is
-picked up rather than reported as still there. A control the sensor refuses is
-greyed out with a note saying so, rather than pretending to work.
-
-## First flash
-
-Requires PlatformIO and a USB cable, once.
+## Flashing it
 
 ```bash
-pio run -e esp32cam -t upload
+git clone https://github.com/TheAmbitiousCorry/argus-cam.git
+cd argus-cam
+pio run -t upload          # over USB, on /dev/ttyUSB0
+pio device monitor         # 115200 baud
 ```
 
-Then join `ESP32CAM-Setup-XXXX` and follow the page. Note that an SD card in the
-slot blocks USB flashing, because the card holds a boot strapping pin high;
-take it out for the first flash, and after that updates go over Wi-Fi anyway.
+Take the SD card out before flashing over USB. GPIO2 is shared between the card and the boot strap, and a card in the slot will stop the board entering download mode.
 
-## Honestly
+The build stamps `git describe` into the firmware as its version, which is what the camera reports at `/version` and advertises over mDNS.
 
-Written from scratch on an AI-Thinker ESP32-CAM rather than forked: 6,900 lines,
-70% of the flash, and every rule in `docs/principles.md` has the measurement
-behind it. Worth reading before adding anything that touches the camera, the
-card or the radio.
-
-It signs you in over plain HTTP. The password is stored as a salted PBKDF2 hash
-and compared in constant time, but there is no TLS, so this belongs on a network
-you trust. Do not put it on the internet.
-
-To watch several of these on one screen, with one login, [Argus
-NVR](https://github.com/TheAmbitiousCorry/argus-nvr) is the sibling repository.
-
-## Status LED
-
-The small red LED on the back of the module reports what the camera is doing.
-It is the only feedback available before the camera reaches the network.
-
-| Pattern | Meaning |
-|---|---|
-| Solid | Powered and running, not yet on the network |
-| Fast blink, about 3 per second | Joining a Wi-Fi network |
-| Brief flash every 3 seconds | On the network, serving pages |
-| Two quick blinks every 2 seconds | On the network, camera sensor not detected |
-
-Solid that never changes means the firmware started but never reached the
-network.
-
-## Factory reset
-
-Resetting erases the Wi-Fi network, the sign-in password, and the update
-password. It does not erase the SD card.
-
-1. Press and hold the reset button for about 1 second, then release.
-2. Wait about 1 second.
-3. Repeat until you have pressed three times.
-
-The camera erases its settings and returns to the setup network.
-
-A brief tap does not reset the chip, so the press does not count. Hold each press
-for about a second. Leave less than 5 seconds between presses, or the count
-returns to zero.
-
-The reset button on the ESP32-CAM-MB programmer board and the button on the
-underside of the module both work.
-
-## Updating firmware
-
-Two paths exist. Both require signing in.
-
-### From a browser
-
-1. Open **Firmware** in the sidebar.
-2. Choose a `firmware.bin`.
-3. Select **Upload**.
-
-Progress appears in MB. The camera restarts into the new firmware and signs you
-out.
-
-### From the command line
-
-Set the address and update password in `platformio.local.ini`, which git ignores:
-
-```ini
-[env:esp32cam_ota]
-upload_port = 192.168.10.208
-upload_flags =
-  --host_port=45678
-  --auth=<update password from the status page>
-```
-
-Then run:
+Later updates can go over the air instead:
 
 ```bash
 pio run -e esp32cam_ota -t upload
 ```
 
-The device opens a connection back to your machine on port 45678. Allow that
-port through your firewall from the camera's address.
+Point `upload_port` at your camera and pass the OTA password in a `platformio.local.ini` (gitignored) rather than editing the tracked file:
 
-### If an update fails
-
-A new firmware image is on trial until it reaches the network with its web
-server answering. An image that restarts before confirming is discarded, and the
-previous firmware runs again. The status page reports `on trial` or `confirmed`,
-and names the version of any image that was reverted.
-
-## Recovery access point
-
-The camera opens its setup network for 15 minutes after each restart, so a
-camera whose stored Wi-Fi stops working stays reachable. Signing in still
-requires the password.
-
-The access point closes early once the camera holds a Wi-Fi connection for 60
-seconds, because both share one radio.
-
-To turn it off, clear the checkbox on the **Settings** page.
-
-## Building
-
-Requires PlatformIO. The platform is pinned to a pioarduino release, which
-supplies Arduino core 3.x.
-
-```bash
-pio run -e esp32cam                 # build
-pio run -e esp32cam -t upload       # flash over USB
-pio run -e esp32cam_ota -t upload   # flash over Wi-Fi
+```ini
+[env:esp32cam_ota]
+upload_port = camera-alpha.local
+upload_flags = --host_port=45678 --auth=YOUR_OTA_PASSWORD
 ```
 
-The version string comes from `git describe` at build time and appears on the
-status page.
+## First boot
 
-## Design principles
+1. Power the camera. The status LED blinks fast while it looks for a network.
+2. It has no configuration yet, so it raises its own open Wi-Fi network called **`ESP32CAM-Setup-XXXX`** (the last four hex digits of its MAC). Join it.
+3. A captive portal opens. If it does not, browse to **`http://192.168.0.1`**.
+4. Fill in four things: a camera name, your Wi-Fi network and password, and an admin username and password (8 characters minimum). The name field is pre-filled with a suggestion drawn from the chip's own MAC, so the same board always proposes the same name.
+5. Save. The camera restarts and joins your network.
+6. Find it at **`http://<the-name-you-chose>.local`** and sign in.
 
-`docs/principles.md` records what this board taught us, with the measurement
-behind each rule. Read it before adding anything that touches the camera, the
-card, or the radio.
+There is no password recovery. If you lose it, tap the reset button three times within five seconds to wipe the configuration and start over.
 
-## Hardware notes
+After every restart the camera also reopens that setup access point for 15 minutes, closing early once the main connection has been healthy for a minute. Joining it does not skip the login: it is a way back onto the camera when your router has moved, not a back door. You can turn it off in Settings.
 
-### An inserted SD card blocks USB flashing
+## Using it
 
-GPIO2 is both an SD data line and a boot strapping pin. A card in the slot holds
-it high, which prevents the download mode that USB flashing needs. Remove the
-card to flash over USB, or update over Wi-Fi instead.
+Sign in and you get:
 
-### Pin usage
-
-| Pins | Used by |
+| Page | What it is for |
 |---|---|
-| 0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39 | Camera |
-| 2, 14, 15 | SD card, 1-bit SDMMC |
-| 16 | PSRAM chip select |
-| 1, 3 | Serial console |
-| 4 | White flash LED |
-| 33 | Status LED |
-| 12, 13 | Free |
+| `/` | Live view. Pinch or scroll to zoom, fire the flash, start and stop recording, adjust the image with sliders that write to the sensor as you move them |
+| `/recording` | Motion sensitivity, clip length, pre-roll, quiet period, day and hour schedule, resolution, JPEG quality, free-space floor |
+| `/files` | Browse the card, sort by name, size, or length, play or download recordings, delete in bulk |
+| `/play?dir=…` | Scrub through one recording frame by frame, or play it at its true recorded pace |
+| `/status` | Sensor state, uptime, signal, reconnect count, viewers, card space, heap and PSRAM, reset presses |
+| `/settings` | Name, Wi-Fi, OTA password, timezone, setup-AP window |
+| `/update` | Firmware version, running slot, trial state, last rollback, and an upload box |
 
-The SD card runs in 1-bit mode. 4-bit mode additionally needs GPIO4 and GPIO12,
-and GPIO12 stops the board booting if it reads high at reset.
+![Live view](docs/media/live.png)
 
-### Power
+### Recording behaviour
 
-The camera draws current spikes when the sensor initialises and when the radio
-transmits. Use a 5V supply rated at 1A or more and a short cable. An inadequate
-supply produces symptoms that look like unrelated faults: an undetected camera
-sensor, weak Wi-Fi signal, and repeated restarts.
+Motion is measured by decoding each frame at 1/8 scale, reducing it to a 10x8 grid of brightness blocks, and counting how many blocks changed by more than 14 out of 255 since the last check. The **sensitivity** setting is that count as a percentage: at the default of 20, a fifth of the scene has to change. Checks run every 800ms, so movement has to persist for about a second to trigger, which is what stops a passing shadow from filling your card.
+
+When it triggers:
+
+- The last few seconds are already buffered in PSRAM (**pre-roll**, 5s by default) and get written first, so the clip opens before the event.
+- Recording runs for at least **`recordSeconds`** (10s by default). That is a minimum, not a cap.
+- Every second, if the scene is still moving, the end is pushed back by **`quietSeconds`** (5s). The clip ends when things go still, not when a timer expires.
+- A hard ceiling of 5 minutes stops continuous traffic producing one endless file.
+- Afterwards there is a 4-second cooldown so the tail of one event does not immediately re-trigger the next.
+
+Clips land in `/rec/YYYY-MM-DD/HHMMSS/` as `video.mjpeg` plus `index.txt` (one line per frame: offset, length, timestamp). Before the clock has synced over NTP there are no dates to use, so recordings go to `/rec/1`, `/rec/2` and so on instead.
+
+When free space drops below **`keepFreeMb`** (512MB by default), the oldest day is deleted first, up to 20 recordings per pass. Set it to 0 to disable that and let the card fill.
+
+Capture is capped at 25fps regardless of what the card can take, because 25fps fills 30GB in about 22 hours.
+
+### Streaming
+
+`http://<camera>/` for pages and the API, `http://<camera>:81/stream` for video. **Three concurrent viewers**, across live and replay together. A fourth gets an immediate `503` rather than a connection that hangs. Two viewers at once roughly halve each other's frame rate, since there is one radio.
+
+### If there is no card
+
+Recording still runs, it just writes nothing. State stays correct (`active`, timings, and the `cardless` flag at `/record`), so a recorder watching the live stream can record on the camera's behalf. That is how Argus NVR covers a camera whose card died.
+
+## API
+
+Everything is behind the session cookie from `POST /login`. Page routes redirect to `/login` when signed out; API routes return `401`.
+
+```bash
+# sign in, keep the cookie
+curl -c jar -d 'user=admin&pass=YOURPASS' http://camera-alpha.local/login
+
+# what is it doing right now
+curl -b jar http://camera-alpha.local/record
+
+# grab a still
+curl -b jar -o still.jpg 'http://camera-alpha.local/capture?flash=1'
+
+# what days have recordings
+curl -b jar http://camera-alpha.local/recordings/days
+
+# download one as a playable AVI
+curl -b jar -o clip.avi 'http://camera-alpha.local/video?dir=/rec/2026-08-30/213155'
+```
+
+### Reference
+
+| Method | Path | Returns |
+|---|---|---|
+| `POST` | `/login` | Sets `sid` cookie. Form: `user`, `pass` |
+| `GET` | `/logout` | Ends the session |
+| `GET` | `/version` | `{mac, version, built, slot, onTrial, rolledBackFrom}` |
+| `GET` | `/config` | Every setting as JSON, plus `storage`, live `aelnow`/`gcnow`, and `unsupported` |
+| `GET` | `/record` | Live state: `active, frames, fps, triggered, motion, armed, change, threshold, preFrames, lux, rung, storage, cardless` |
+| `POST` | `/record` | Toggles recording |
+| `POST` | `/image` | Applies sensor settings live. Form: `autoimg, ael, gc, bri, con, sat, wb, flashlvl, gray, hmir, vflip`. Replies `ok`, or a list of controls the sensor refused |
+| `POST` | `/recording` | Motion, schedule, resolution, quality, retention. Applied without a reboot |
+| `POST` | `/settings` | Name, Wi-Fi, OTA password, timezone. Reboots |
+| `GET` | `/capture` | One JPEG. `?flash=1` fires the LED |
+| `GET` | `:81/stream` | MJPEG, `multipart/x-mixed-replace`, boundary `espcamframeboundary` |
+| `GET` | `:81/playstream?dir=&from=` | Replays a recording at its recorded pace, same framing |
+| `GET` | `/recordings/days` | `{days, loose, more}` |
+| `GET` | `/recordings?day=YYYY-MM-DD` | `{day, recordings:[{at,durMs,bytes,frames}], more}` |
+| `GET` | `/recindex?dir=` | Frame index as `[[atMs, offset, length], …]` |
+| `GET` | `/frame?dir=&off=&len=` | One JPEG read straight at that offset |
+| `GET` | `/video?dir=` | The recording muxed into AVI on the fly |
+| `GET` | `/download?path=` | Any file on the card, chunked |
+| `POST` | `/files` | Deletes. Body: repeated `f=<path>` |
+| `POST` | `/update` | Raw firmware bytes with `Content-Length`. Flashes and reboots |
+| `GET` | `/networks` | Nearby Wi-Fi as `[{s, r}]` |
+| `GET` | `/sdbench` | Times small-file against single-file writes on this card |
+
+The camera holds 12 sessions and evicts the oldest, and those are shared with anyone browsing its UI. Sessions last 12 hours and survive a reboot. Poll `/record` no faster than every couple of seconds: an HTTP round trip can take 3 seconds when the camera is busy, so timeouts under 10 seconds will report a healthy camera as offline.
+
+### Being found
+
+The camera advertises `_http._tcp` on port 80 as `<name>.local`, with TXT records `argus=cam` and `fw=<version>`. The tag matters: everything with a web server answers `_http._tcp`, and the tag is how a recorder tells a camera from your router.
+
+## Settings
+
+| Setting | Default | Range |
+|---|---|---|
+| `motionEnabled` | off | |
+| `motionSensitivity` | 20 | 1-100 (% of blocks changed) |
+| `recordSeconds` | 10 | minimum clip length |
+| `prerollSeconds` | 5 | seconds buffered before the trigger |
+| `quietSeconds` | 5 | stillness needed to end a clip |
+| `keepFreeMb` | 512 | 0 disables auto-delete |
+| `scheduleEnabled` | off | needs a synced clock; without one, motion stays armed |
+| `scheduleFromHour` / `scheduleToHour` | 22 / 6 | 0-23, wraps midnight |
+| `scheduleDays` | every day | bitmask, Sunday is bit 0 |
+| `frameSize` | SVGA (800x600) | QVGA to UXGA. Changing it restarts the sensor |
+| `jpegQuality` | 12 | 10 (best) to 63 |
+| `autoImage` | on | camera drives exposure and gain itself |
+| `aeLevel` | 0 | -2 to 2 |
+| `gainCeiling` | 0 | 0-6, mapping to 2x through 128x |
+| `brightness` / `contrast` / `saturation` | 0 | -2 to 2 each |
+| `wbMode` | auto | auto, sunny, cloudy, office, home |
+| `grayscale`, `hmirror`, `vflip` | off | |
+| `flashLevel` | 60 | 0-255. Capped at 1.5s on, the LED has no heatsink |
+| `apWindow` | on | reopen the setup AP for 15 min after each restart |
+| `timezone` | UTC0 | POSIX TZ string, e.g. `SAST-2` |
+
+Auto-exposure is a 10-rung ladder rather than the sensor's own loop. It targets mid-grey 110/255 with a wide deadband, spends exposure compensation before it spends gain, sheds gain before it sheds exposure, and needs two readings in the same direction before it moves, so someone walking past the lens does not make it hunt.
+
+## Status LED
+
+The LED on GPIO33 is the only output you get before the network works.
+
+| Pattern | Meaning |
+|---|---|
+| Solid | Booting |
+| Fast blink | Looking for Wi-Fi, or waiting in setup mode |
+| Brief flash every 3s | Online, servers answering |
+| Double blink | On the network, but the camera sensor did not respond |
+
+## Known constraints
+
+- **1-bit SD mode only.** 4-bit needs GPIO4 (the flash LED) and GPIO12 (a boot strap pin that blocks boot if it reads high). Both are already spoken for on this board.
+- **The firmware never formats a card.** A card it cannot read is reported as such rather than wiped.
+- **No HTTPS.** This is a LAN device on plain HTTP. The session cookie is `HttpOnly` and `SameSite=Lax` but deliberately not `Secure`.
+- **Failed logins cost 1.2 seconds** and that is the whole of the brute-force defence. Do not expose this to the internet.
+- **OTA over espota uses MD5**, which is weaker than the PBKDF2 hash guarding the web login. That is the protocol's design, not a choice made here.
+- **Partition layout is `min_spiffs.csv`**, two 1.875MB app slots. Changing it later means erasing the device.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

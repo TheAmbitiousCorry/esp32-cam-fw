@@ -2,57 +2,108 @@
 
 # Argus Cam
 
-**Argus NVR compatible ESP32-CAM firmware.** Flash it once over USB and never
-open a serial console again: everything after that happens in a browser, or over
-the air.
+**Argus NVR compatible ESP32-CAM firmware.** Flash it once over USB, then set it
+up from your phone like any other device. No serial console, no config file, no
+credentials compiled in, and no cable ever again.
 
 ![Live view, the file browser, motion settings, and status](docs/media/argus-cam.gif)
 
-## What you get
+## It sets itself up
 
-- **24 frames a second at 800x600**, straight from the sensor to your browser,
-  and to the SD card at the same time.
-- **Motion recording** with a threshold you can see against the live reading, a
-  schedule, and seconds of footage kept from *before* the trigger.
-- **Recordings that play.** Download one and it opens in any player: the camera
-  wraps its frames in a container on the way out, without re-encoding anything.
-- **Exposure that follows the light.** One ladder from bright to dark, moving
-  only when the scene has genuinely changed, so a passing shadow does not swing
-  the picture.
-- **Updates that cannot brick it.** An image that fails to reach the network is
-  discarded and the previous firmware runs again. The status page names the
-  version it reverted from.
-- **Recovery you can reach.** Three deliberate presses of the reset button
-  restore the setup network, whatever state the settings are in.
+A camera with no settings broadcasts its own open network, `ESP32CAM-Setup-XXXX`,
+named from its MAC so two cameras in a box are never the same one. Join it from
+a phone and the setup page opens by itself.
 
-Written from scratch, not forked: 6,900 lines, 70% of the flash, no serial
-console needed after the first flash. `docs/principles.md` records what this
-board taught us with the measurement behind each rule, which is worth reading
-before adding anything that touches the camera, the card, or the radio.
+It has already scanned for networks, so yours is in a list rather than something
+to type. It proposes a name for the camera, drawn from Greek myth and picked
+from the board's own MAC, so the same camera always suggests the same name and
+two of them never collide. Set a password, save, and the camera joins your
+network and disappears from the air.
+
+From then on it is `http://<name>.local`, and the only thing you ever needed a
+cable for was the first flash.
+
+**It stays reachable when the network does not.** The setup access point reopens
+for fifteen minutes after every restart, so a camera whose Wi-Fi has changed
+underneath it is still something you can walk up to, not something you take down
+from the wall. It closes on its own once the camera has held a connection for a
+minute, because both share one radio.
+
+**And when all else fails, three presses.** Hold the reset button for a second,
+three times, and it clears its settings and comes back as a new camera. No
+serial console, no reflash, and nothing to remember but the button already on
+the board.
+
+## What it does
+
+**Live view** at 24 frames a second, with digital zoom that follows where you
+click and drag, and a still capture that can fire the flash for that one frame.
+
+**Records to the SD card** on motion, keeping seconds of footage from *before*
+the trigger so an event does not start with the subject already in shot. A
+recording extends itself while movement continues and stops once the scene has
+been still. The threshold is shown against the live reading, so it can be set
+against what the camera is actually seeing, and a schedule decides when it arms.
+
+**Plays back in the browser**, scrubbing through a recording at the speed it was
+captured, with a date filter and sorting by name, size or length. Download one
+and it opens in any player: the frames are wrapped in a container on the way
+out, with nothing re-encoded and the real frame rate written into it.
+
+**Adjusts its own exposure**, one ladder from bright to dark, moving only after
+two readings agree so a passing shadow does not swing the picture. It reports
+where it has settled, and what the sensor is actually doing rather than what was
+last stored.
+
+**Exposes every setting** through the web interface and as JSON: resolution,
+quality, brightness, contrast, saturation, white balance, mirroring, flash
+brightness, motion sensitivity, schedule, retention.
+
+**Ages footage out** to keep the card from filling, oldest first.
+
+**Announces itself** over mDNS as a camera rather than as another web server, so
+an aggregator can tell it apart from the router.
+
+## An update cannot brick it
+
+New firmware goes over the air from the browser or from PlatformIO. An image is
+on trial until it reaches the network with its web server answering; one that
+restarts before confirming is discarded and the previous firmware runs again.
+The status page names the version it reverted from, so a failed update is
+something you are told about rather than something you discover.
+
+## It tells you the truth about itself
+
+Sensor state is asked of the driver rather than remembered from boot. The SD
+card is re-checked rather than assumed, and a card swapped while it runs is
+picked up rather than reported as still there. A control the sensor refuses is
+greyed out with a note saying so, rather than pretending to work.
+
+## First flash
+
+Requires PlatformIO and a USB cable, once.
+
+```bash
+pio run -e esp32cam -t upload
+```
+
+Then join `ESP32CAM-Setup-XXXX` and follow the page. Note that an SD card in the
+slot blocks USB flashing, because the card holds a boot strapping pin high;
+take it out for the first flash, and after that updates go over Wi-Fi anyway.
 
 ## Honestly
+
+Written from scratch on an AI-Thinker ESP32-CAM rather than forked: 6,900 lines,
+70% of the flash, and every rule in `docs/principles.md` has the measurement
+behind it. Worth reading before adding anything that touches the camera, the
+card or the radio.
 
 It signs you in over plain HTTP. The password is stored as a salted PBKDF2 hash
 and compared in constant time, but there is no TLS, so this belongs on a network
 you trust. Do not put it on the internet.
 
-To watch several of these on one screen, with one login and one connection per
-camera, [Argus NVR](https://github.com/TheAmbitiousCorry/argus-nvr) is the
-sibling repository.
-
-## First run
-
-A camera with no stored settings broadcasts its own network.
-
-1. Join the Wi-Fi network named `ESP32CAM-Setup-XXXX`, where `XXXX` comes from the
-   camera's MAC address. It has no password.
-2. Open `http://192.168.0.1` if the setup page does not appear on its own.
-3. Enter a camera name, choose your Wi-Fi network, and set a sign-in password of
-   at least 8 characters.
-4. Select **Save and restart**.
-
-The camera joins your network and its setup network disappears. Reach it at
-`http://<camera-name>.local`, or at the address your router assigns.
+To watch several of these on one screen, with one login, [Argus
+NVR](https://github.com/TheAmbitiousCorry/argus-nvr) is the sibling repository.
 
 ## Status LED
 
